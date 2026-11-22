@@ -1,6 +1,6 @@
 # github_runner
 
-[![CI](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml)
+[![CI](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml)
 ![Language](https://img.shields.io/badge/Language-Bash-blue?style=flat-square)
 ![Testing](https://img.shields.io/badge/Testing-Bats-orange?style=flat-square)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Compliant-brightgreen?style=flat-square)
@@ -33,7 +33,7 @@
 ## TL;DR
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 gh auth login --scopes admin:org        # 未ログインの場合
 
 ./script/init.sh <your-org>             # ホスト準備 + 最初の runner を登録
@@ -68,9 +68,8 @@ GitHub 側の状態のレポート、自動アップグレードの残骸のク�
 ます。1 つの clone が `<repo_root>/runners/` 配下のすべての runner state を
 所有し、すべてのスクリプトは idempotent です。
 
-スクリプトは汎用的で、任意の org / repo を渡せます。`ycpss91255-research` と
-`ycpss91255-docker` の 2 org は全文を通じて具体例にすぎず（作者が運用している
-org）、ハードコードされていません。
+スクリプトは汎用的で、任意の org / repo を渡せます。`ycpss91255-lab` org は
+全文を通じて具体例にすぎず（作者が運用している org）、ハードコードされていません。
 
 ## ディレクトリ構成
 
@@ -82,9 +81,7 @@ org）、ハードコードされていません。
 <repo_root>/runners/                                   # デフォルト RUNNER_HOME
 ├── .bin/
 │   └── actions-runner-linux-x64-<version>.tar.gz      # キャッシュ済み tarball
-├── ycpss91255-docker/
-│   └── _org/                                          # org-level runner
-└── ycpss91255-research/
+└── ycpss91255-lab/
     └── _org/                                          # org-level runner
 ```
 
@@ -157,7 +154,7 @@ runner の登録時に、オプションの設定ファイル `${RUNNER_HOME}/se
 `setup.conf` は書き込み後に登録される runner にのみ影響します。既存 runner の label をライブで変更する（remove + 再登録なし）には `script/set-labels.sh` を使います：
 
 ```bash
-./script/set-labels.sh org ycpss91255-docker gpu,cuda12
+./script/set-labels.sh org ycpss91255-lab gpu,cuda12
 ./script/set-labels.sh repo <owner> <repo> gpu,cuda12
 ```
 
@@ -165,8 +162,8 @@ runner の登録時に、オプションの設定ファイル `${RUNNER_HOME}/se
 
 ## テスト
 
-テストは `ghcr.io/ycpss91255-docker/test-tools` イメージ内で実行します
-（alpine + bats + shellcheck + hadolint、`ycpss91255-docker/base` と
+テストは `ghcr.io/ycpss91255-lab/test-tools` イメージ内で実行します
+（alpine + bats + shellcheck + hadolint、`ycpss91255-lab/base` と
 同じイメージ）。カバレッジは `kcov/kcov` イメージ内で実行します
 （Debian、`kcov` 同梱だが `bats` はなし）。`bats-core` は
 `script/fetch-bats.sh` がバージョンを固定し sha256 検証したうえで host に
@@ -323,7 +320,7 @@ exit します（不足項目をすべて列挙）。
 runner は `script/add-runner.sh` で登録：
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/install-deps.sh                # gh/jq/curl/sudo + gh auth login を導入
                                         # （設定済みならスキップ可；Docker+NVIDIA は事前に必要）
 
@@ -408,7 +405,7 @@ runner-group フラグのリセット(他ホストと共有の可能性)、こ�
 マシン消失 / OS 再インストール後：
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/init.sh <your-org>
 ./script/add-runner.sh org <other-org>
 ```
@@ -434,7 +431,7 @@ on-call 向け対応表:`status.sh` の各状態(`offline` / `not-found` / `n/a`
 
 ## ライセンス
 
-[Apache-2.0](../../LICENSE) — [ycpss91255-docker/base] および org 内の
+[Apache-2.0](../../LICENSE) — [ycpss91255-lab/base] および org 内の
 他のリポジトリと整合。
 
-[ycpss91255-docker/base]: https://github.com/ycpss91255-docker/base
+[ycpss91255-lab/base]: https://github.com/ycpss91255-lab/base
