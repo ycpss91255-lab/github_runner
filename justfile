@@ -3,14 +3,14 @@
 # test-host), same prebuilt test-tools + kcov pattern. github_runner is a
 # flat repo (no `.base/` subtree, no template container wrapper), so this
 # single root `justfile` is the whole self-test entry -- the flat analogue
-# of ycpss91255-docker/base's layered `test` namespace, kept aligned
+# of ycpss91255-lab/base's layered `test` namespace, kept aligned
 # recipe-for-recipe.
 
-# Aligns with ycpss91255-docker/base: same prebuilt test-tools image
+# Aligns with ycpss91255-lab/base: same prebuilt test-tools image
 # (alpine + shellcheck + bats + hadolint + bats-{support,assert,mock}).
 # env_var_or_default keeps a caller's TEST_TOOLS_IMAGE=... override winning
 # (the old Makefile `?=`), e.g. for local rebuild flows.
-TEST_TOOLS_IMAGE := env_var_or_default('TEST_TOOLS_IMAGE', 'ghcr.io/ycpss91255-docker/test-tools:latest')
+TEST_TOOLS_IMAGE := env_var_or_default('TEST_TOOLS_IMAGE', 'ghcr.io/ycpss91255-lab/test-tools:latest')
 
 # Coverage uses kcov's own image (Debian-based, ships kcov but no bats).
 # bats used to be apt-installed at runtime inside the container, which made

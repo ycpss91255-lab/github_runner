@@ -8,7 +8,7 @@
 #   * the kcov `--security-opt seccomp=unconfined` (ptrace) flag, verbatim
 # These are static invariants of the file, guarded WITHOUT invoking docker /
 # just (the recipes themselves are exercised by the CI gate). Aligns
-# recipe-for-recipe with ycpss91255-docker/base's self-test `just` entry.
+# recipe-for-recipe with ycpss91255-lab/base's self-test `just` entry.
 
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
@@ -43,7 +43,7 @@ setup() {
   # mirroring Makefile.ci's `?=`.
   run grep -E "TEST_TOOLS_IMAGE.*env_var_or_default\('TEST_TOOLS_IMAGE'" "${JUSTFILE}"
   [ "${status}" -eq 0 ]
-  run grep -F 'ghcr.io/ycpss91255-docker/test-tools:latest' "${JUSTFILE}"
+  run grep -F 'ghcr.io/ycpss91255-lab/test-tools:latest' "${JUSTFILE}"
   [ "${status}" -eq 0 ]
 }
 

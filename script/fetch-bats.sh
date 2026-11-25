@@ -16,7 +16,7 @@
 # bats-core is pure bash and runs straight from an unpacked release -- there is
 # no build and no install step -- which is what makes caching a release tarball
 # the cheapest way to pin it. The repo publishes no image of its own (it only
-# consumes ghcr.io/ycpss91255-docker/test-tools), so baking kcov + bats into an
+# consumes ghcr.io/ycpss91255-lab/test-tools), so baking kcov + bats into an
 # image was not an option available here.
 #
 # Usage:

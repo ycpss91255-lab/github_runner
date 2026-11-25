@@ -1,6 +1,6 @@
 # github_runner
 
-[![CI](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml)
+[![CI](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml)
 ![Language](https://img.shields.io/badge/Language-Bash-blue?style=flat-square)
 ![Testing](https://img.shields.io/badge/Testing-Bats-orange?style=flat-square)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Compliant-brightgreen?style=flat-square)
@@ -33,7 +33,7 @@
 ## TL;DR
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 gh auth login --scopes admin:org        # 若尚未登入
 
 ./script/init.sh <your-org>             # 準備 host + 註冊第一個 runner
@@ -63,8 +63,8 @@ org-level 或 repo-level runner、安裝成 systemd service、cache 與升級 ru
 binary、回報本地與 GitHub 端狀態、清理自動升級殘料。一份 clone 擁有
 `<repo_root>/runners/` 底下所有 runner state,所有 script 皆為 idempotent。
 
-這些 script 是通用的 — 任何 org 或 repo 都能傳入。`ycpss91255-research` 與
-`ycpss91255-docker` 兩個 org 在全文只是具體範例(作者自己跑的 org),並未寫死綁定。
+這些 script 是通用的 — 任何 org 或 repo 都能傳入。`ycpss91255-lab`
+org 在全文只是具體範例(作者自己跑的 org),並未寫死綁定。
 
 ## 目錄結構
 
@@ -76,9 +76,7 @@ binary、回報本地與 GitHub 端狀態、清理自動升級殘料。一份 cl
 <repo_root>/runners/                                   # 預設 RUNNER_HOME
 ├── .bin/
 │   └── actions-runner-linux-x64-<version>.tar.gz      # 快取的 tarball
-├── ycpss91255-docker/
-│   └── _org/                                          # org-level runner
-└── ycpss91255-research/
+└── ycpss91255-lab/
     └── _org/                                          # org-level runner
 ```
 
@@ -149,7 +147,7 @@ Runner 註冊時會讀取選用的設定檔 `${RUNNER_HOME}/setup.conf`（`KEY=v
 `setup.conf` 只影響寫入之後才註冊的 runner。要即時改既有 runner 的 label（免 remove + 重新註冊），用 `script/set-labels.sh`：
 
 ```bash
-./script/set-labels.sh org ycpss91255-docker gpu,cuda12
+./script/set-labels.sh org ycpss91255-lab gpu,cuda12
 ./script/set-labels.sh repo <owner> <repo> gpu,cuda12
 ```
 
@@ -157,8 +155,8 @@ Runner 註冊時會讀取選用的設定檔 `${RUNNER_HOME}/setup.conf`（`KEY=v
 
 ## 測試
 
-測試在 `ghcr.io/ycpss91255-docker/test-tools` image 內執行（alpine +
-bats + shellcheck + hadolint，跟 `ycpss91255-docker/base` 用同一個 image），
+測試在 `ghcr.io/ycpss91255-lab/test-tools` image 內執行（alpine +
+bats + shellcheck + hadolint，跟 `ycpss91255-lab/base` 用同一個 image），
 覆蓋率在 `kcov/kcov` 內跑（Debian，內含 `kcov`，但沒有 `bats`）；`bats-core`
 由 `script/fetch-bats.sh` 以固定版本 + sha256 驗證後快取在 host，再掛進
 container。執行期不安裝任何套件，且 coverage container 以 `--network none`
@@ -295,7 +293,7 @@ Docker 與 NVIDIA Container Toolkit 須先自行安裝（牽涉 kernel driver / 
 ——它們是佔位符,不是字面值。其他 runner 用 `script/add-runner.sh` 新增：
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/install-deps.sh                # 裝 gh/jq/curl/sudo + gh auth login
                                         # （已設定好可略過;Docker+NVIDIA 須先存在）
 
@@ -375,7 +373,7 @@ prompt,先預覽再確認:
 機器遺失 / 重灌後：
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/init.sh <your-org>
 ./script/add-runner.sh org <other-org>
 ```
@@ -399,7 +397,7 @@ on-call 對照表:把 `status.sh` 的每個狀態(`offline` / `not-found` / `n/a
 
 ## 授權
 
-[Apache-2.0](../../LICENSE) — 與 [ycpss91255-docker/base] 以及 org 內其他
+[Apache-2.0](../../LICENSE) — 與 [ycpss91255-lab/base] 以及 org 內其他
 repo 一致。
 
-[ycpss91255-docker/base]: https://github.com/ycpss91255-docker/base
+[ycpss91255-lab/base]: https://github.com/ycpss91255-lab/base

@@ -1,6 +1,6 @@
 # github_runner
 
-[![CI](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-research/github_runner/actions/workflows/ci.yaml)
+[![CI](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml/badge.svg)](https://github.com/ycpss91255-lab/github_runner/actions/workflows/ci.yaml)
 ![Language](https://img.shields.io/badge/Language-Bash-blue?style=flat-square)
 ![Testing](https://img.shields.io/badge/Testing-Bats-orange?style=flat-square)
 ![ShellCheck](https://img.shields.io/badge/ShellCheck-Compliant-brightgreen?style=flat-square)
@@ -33,7 +33,7 @@
 ## TL;DR
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 gh auth login --scopes admin:org        # if not already
 
 ./script/init.sh <your-org>             # prep host + register first runner
@@ -68,8 +68,8 @@ GitHub-side state, and prune auto-update leftovers. One clone owns all runner
 state under `<repo_root>/runners/`, and every script is idempotent.
 
 The scripts are general-purpose -- pass any org or repo. The
-`ycpss91255-research` and `ycpss91255-docker` orgs appear throughout only as
-concrete examples (the orgs the author runs it for); nothing is hard-coded to
+The `ycpss91255-lab` org appears throughout only as a
+concrete example (the org the author runs it for); nothing is hard-coded to
 them.
 
 ## Layout
@@ -82,9 +82,7 @@ checkout, gitignored). One clone owns all the state -- no separate
 <repo_root>/runners/                                   # default RUNNER_HOME
 ├── .bin/
 │   └── actions-runner-linux-x64-<version>.tar.gz      # cached tarball
-├── ycpss91255-docker/
-│   └── _org/                                          # org-level runner
-└── ycpss91255-research/
+└── ycpss91255-lab/
     └── _org/                                          # org-level runner
 ```
 
@@ -163,7 +161,7 @@ the routing key for `runs-on`: a job lands on a runner only when the job's
 already-registered runner live (no remove + re-register), use `script/set-labels.sh`:
 
 ```bash
-./script/set-labels.sh org ycpss91255-docker gpu,cuda12
+./script/set-labels.sh org ycpss91255-lab gpu,cuda12
 ./script/set-labels.sh repo <owner> <repo> gpu,cuda12
 ```
 
@@ -171,8 +169,8 @@ already-registered runner live (no remove + re-register), use `script/set-labels
 
 ## Testing
 
-Tests run inside the `ghcr.io/ycpss91255-docker/test-tools` image (alpine +
-bats + shellcheck + hadolint, same image used by `ycpss91255-docker/base`).
+Tests run inside the `ghcr.io/ycpss91255-lab/test-tools` image (alpine +
+bats + shellcheck + hadolint, same image used by `ycpss91255-lab/base`).
 Coverage runs inside `kcov/kcov` (Debian, ships `kcov` but no `bats`), with a
 pinned, sha256-verified `bats-core` release cached on the host by
 `script/fetch-bats.sh` and mounted into the container. Nothing is installed at
@@ -333,7 +331,7 @@ name(s) — they are placeholders, not literal values. Additional runners are
 added with `script/add-runner.sh`:
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/install-deps.sh                # install gh/jq/curl/sudo + gh auth login
                                         # (skip if already set up; Docker+NVIDIA must pre-exist)
 
@@ -422,7 +420,7 @@ Remove). See [Troubleshooting](#troubleshooting) for stuck states.
 After machine loss / reformat:
 
 ```bash
-git clone https://github.com/ycpss91255-research/github_runner.git && cd github_runner
+git clone https://github.com/ycpss91255-lab/github_runner.git && cd github_runner
 ./script/init.sh <your-org>
 ./script/add-runner.sh org <other-org>
 ```
@@ -448,7 +446,7 @@ fix: **[doc/runbook/TROUBLESHOOTING.md](doc/runbook/TROUBLESHOOTING.md)**.
 
 ## License
 
-[Apache-2.0](./LICENSE) -- aligns with [ycpss91255-docker/base] and the
+[Apache-2.0](./LICENSE) -- aligns with [ycpss91255-lab/base] and the
 rest of the org's repos.
 
-[ycpss91255-docker/base]: https://github.com/ycpss91255-docker/base
+[ycpss91255-lab/base]: https://github.com/ycpss91255-lab/base

@@ -1,4 +1,4 @@
-module github.com/ycpss91255-research/github_runner/listener
+module github.com/ycpss91255-lab/github_runner/listener
 
 go 1.25.3
 

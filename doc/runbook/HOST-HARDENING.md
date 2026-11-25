@@ -61,7 +61,7 @@ Neither knob alone closes the gap: a CI user *plus rootless*, or a CI user
       `add-runner.sh`; surfaced by `status.sh`).
 - [ ] Self-hosted GPU jobs are **gated to same-repo refs** so forked-PR code
       never reaches the host (see the org reusable workflow
-      `gpu-self-hosted.yml`; e.g. `ycpss91255-docker/isaac`).
+      `gpu-self-hosted.yml`; e.g. `ycpss91255-lab/isaac`).
 - [ ] (Upgrade) Evaluate **rootless Docker / Podman** to drop the
       root-equivalent premise entirely — at which point the dedicated CI user
       becomes a genuine boundary.
