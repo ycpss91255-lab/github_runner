@@ -79,6 +79,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **`require_gh_auth` no longer hangs on a host with a locked GNOME Keyring.**
+  It ran `gh auth status`, which asks the Secret Service about every stored
+  account; in a headless/SSH session the unlock prompt can never show, so the
+  call never returned and `add-runner.sh`, `remove-runner.sh`, `set-labels.sh`,
+  `init.sh` and `install-deps.sh` wedged. The check is now `gh api user`, which
+  resolves only the active token, bounded by `timeout(1)` (`GH_AUTH_TIMEOUT`,
+  default 15s). A timeout prints a FAIL line naming the locked keyring and the
+  workarounds (unlock it, `GH_TOKEN`, or `gh auth login --insecure-storage`).
+
 - **A `.claude` or `.agents` symlink is now ignored (#119).** A worktree gets
   the main checkout's hooks by symlinking `<worktree>/.claude` to the main
   checkout's `.claude/`, but `.gitignore` listed `.claude/` and `.agents/` with

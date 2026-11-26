@@ -20,7 +20,7 @@ teardown() {
 # it keeps these tests image-independent), make `groups` report membership,
 # and -- deliberately -- supply NO nvidia-smi so the non-GPU branch is taken.
 # The `gh` stub answers the three gh shapes init reaches:
-#   - `gh auth status`                       -> exit 0 (authenticated)
+#   - `gh api user` (auth probe)              -> exit 0 (authenticated)
 #   - releases/latest --jq .tag_name         -> a fixed tag (resolve_runner_version)
 #   - releases/tags/v<ver> (digest lookup)   -> EMPTY, so a strict verify fails
 # A non-empty TARBALL_VERSION export is the version the tag resolves to.
@@ -30,7 +30,7 @@ make_prereq_stub() {
   cat >"${STUB}/gh" <<'EOF'
 #!/bin/sh
 case "$1 $2" in
-  "auth status") exit 0 ;;
+  "api user") exit 0 ;;
 esac
 for a in "$@"; do
   case "$a" in

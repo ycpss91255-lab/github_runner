@@ -39,7 +39,7 @@ check_prereqs() {
   command -v curl       >/dev/null || { echo "FAIL: curl not installed" >&2; errors=$((errors+1)); }
   command -v jq         >/dev/null || { echo "FAIL: jq not installed" >&2; errors=$((errors+1)); }
   groups | grep -qw docker || { echo "FAIL: $(id -un) not in docker group" >&2; errors=$((errors+1)); }
-  gh auth status >/dev/null 2>&1 || { echo "FAIL: gh not authenticated (run: gh auth login --scopes admin:org)" >&2; errors=$((errors+1)); }
+  gh_auth_probe || { gh_auth_fail_msg "$?" >&2; errors=$((errors+1)); }
   # #34: the GPU is optional. Auto-detect via nvidia-smi: when present, require
   # the docker GPU runtime to work (the original gate); when absent, skip both
   # GPU checks and proceed as a non-GPU host. HAS_GPU is consumed below to warn

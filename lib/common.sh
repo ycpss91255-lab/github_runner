@@ -393,11 +393,42 @@ _gh() { command gh "$@"; }
 # gh mutation, so an unauthenticated host fails with one clear line instead
 # of gh's raw error mid-operation (and, for remove-runner, before any service
 # teardown that could otherwise strand a half-deregistered runner).
+#
+# The probe is a real, authenticated API call ('gh api user'), NOT
+# 'gh auth status': the latter queries the credential store of EVERY stored
+# account, and on a host whose GNOME Keyring login collection is locked
+# (headless / SSH session, no unlock prompt can ever show) gh blocks forever on
+# the Secret Service D-Bus call. 'gh api' resolves just the active token (here
+# from ~/.config/gh/hosts.yml) and works. The probe is also bounded by
+# timeout(1) (GH_AUTH_TIMEOUT seconds, default 15) so no credential-store
+# stall can wedge the caller; without timeout(1) it runs unbounded.
+# gh_auth_probe: the bounded probe itself; returns 0 ok, 124 timed out, else
+# the failing rc. Never exits, so callers choose their own reaction.
+gh_auth_probe() {
+  local secs="${GH_AUTH_TIMEOUT:-15}"
+  if command -v timeout >/dev/null 2>&1; then
+    export -f _gh
+    timeout "${secs}" bash -c '_gh api user --jq .login' </dev/null >/dev/null 2>&1
+  else
+    _gh api user --jq .login </dev/null >/dev/null 2>&1
+  fi
+}
+
+# gh_auth_fail_msg <rc>: the one-line FAIL text for a gh_auth_probe result.
+gh_auth_fail_msg() {
+  if [ "$1" -eq 124 ]; then
+    echo "FAIL: gh auth check timed out after ${GH_AUTH_TIMEOUT:-15}s. A locked keyring is the usual cause (headless/SSH session: gh waits on the Secret Service for an unlock prompt that can never show). Unlock it, or set GH_TOKEN, or store the token in ~/.config/gh/hosts.yml (gh auth login --insecure-storage)."
+  else
+    echo "FAIL: gh not authenticated (run: gh auth login --scopes admin:org)"
+  fi
+}
+
 require_gh_auth() {
-  _gh auth status >/dev/null 2>&1 || {
-    echo "FAIL: gh not authenticated (run: gh auth login --scopes admin:org)" >&2
-    exit 1
-  }
+  local rc=0
+  gh_auth_probe || rc=$?
+  [ "${rc}" -eq 0 ] && return 0
+  gh_auth_fail_msg "${rc}" >&2
+  exit 1
 }
 
 # (Tarball integrity SEC-5 -- verify_sha256 / runner_asset_digest /

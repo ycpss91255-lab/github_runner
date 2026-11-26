@@ -56,9 +56,9 @@ teardown() {
   printf '\xef\xbb\xbf{\n  "agentId": 142,\n  "agentName": "r"\n}\n' \
     > "${RUNNER_HOME}/myorg/_org/.runner"
   STUB=$(mktemp -d)
-  # 'gh auth status' (the require_gh_auth pre-gate) must succeed; any other
+  # 'gh api user' (the require_gh_auth pre-gate) must succeed; any other
   # subcommand (the live PUT) echoes the server's resulting label set.
-  printf '#!/bin/sh\nif [ "$1" = "auth" ]; then exit 0; fi\nprintf "gpu\\ncuda12\\n"\n' > "${STUB}/gh"
+  printf '#!/bin/sh\nif [ "$1" = "api" ] && [ "$2" = "user" ]; then exit 0; fi\nprintf "gpu\\ncuda12\\n"\n' > "${STUB}/gh"
   chmod +x "${STUB}/gh"
 
   run env PATH="${STUB}:${PATH}" "${SCRIPT}" org myorg gpu,cuda12
@@ -70,16 +70,16 @@ teardown() {
 
 @test "set-labels.sh pre-gates on gh auth and never PUTs when auth fails" {
   # M1 regression: require_gh_auth runs after the .runner/agentId checks and
-  # BEFORE github_set_labels. A failing 'gh auth status' must abort with the
+  # BEFORE github_set_labels. A failing 'gh api user' must abort with the
   # auth FAIL line and never reach the live PUT (which would touch the marker).
   mkdir -p "${RUNNER_HOME}/myorg/_org"
   printf '\xef\xbb\xbf{\n  "agentId": 142,\n  "agentName": "r"\n}\n' \
     > "${RUNNER_HOME}/myorg/_org/.runner"
   STUB=$(mktemp -d)
   MARKER="${STUB}/put-ran"
-  # 'gh auth status' fails (exit 1); any other subcommand (a PUT) would touch
+  # 'gh api user' fails (exit 1); any other subcommand (a PUT) would touch
   # MARKER -- its absence proves the gate fired before the API call.
-  printf '#!/bin/sh\nif [ "$1" = "auth" ]; then exit 1; fi\ntouch "%s"\n' \
+  printf '#!/bin/sh\nif [ "$1" = "api" ] && [ "$2" = "user" ]; then exit 1; fi\ntouch "%s"\n' \
     "${MARKER}" > "${STUB}/gh"
   chmod +x "${STUB}/gh"
 

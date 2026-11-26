@@ -145,7 +145,7 @@ EOF
   cat > "${STUB}/gh" <<'EOF'
 #!/bin/sh
 case "$*" in
-  *"auth status"*)                exit 0 ;;
+  *"api user"*)                   exit 0 ;;
   *fork-pr-contributor-approval*) echo "none" ;;
   *)                              echo "TOKEN" ;;
 esac
@@ -173,7 +173,7 @@ EOF
   cat > "${STUB}/gh" <<'EOF'
 #!/bin/sh
 case "$*" in
-  *"auth status"*)                exit 0 ;;
+  *"api user"*)                   exit 0 ;;
   *fork-pr-contributor-approval*) echo "first_time_contributors" ;;
   *registration-token*)           echo "TOKEN" ;;
   *runner-groups*)                exit 1 ;;

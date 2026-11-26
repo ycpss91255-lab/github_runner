@@ -59,7 +59,6 @@ _stub_bin() {
   cat >"${stub}/gh" <<'EOF'
 #!/bin/sh
 case "$1" in
-  auth) exit 0 ;;
   api)  echo faketoken ;;
 esac
 EOF
