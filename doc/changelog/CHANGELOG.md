@@ -95,11 +95,15 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The scale-set listener acquires available jobs after acknowledging the envelope.**
   Acquisition batches valid availability request IDs. Assignment events mint
   and provision by job ID, including assignments with a zero request ID.
-  On SIGTERM the listener drains its workers, closes the session with a fresh
-  bounded context, and exits successfully when cleanup succeeds.
+  Duplicate raw job IDs are skipped while an assignment is pending dispatch
+  or running. On SIGTERM the listener finishes acquisition and minting for
+  the acknowledged envelope, drains its workers, and closes the session with
+  a fresh bounded context. It exits successfully when cleanup succeeds.
 - **Listener deployment fills in the scale-set owner and installed script paths.**
-  Reruns backfill the protected environment file while preserving existing
-  settings and reusing the stored token.
+  Reruns backfill absent or empty settings while preserving non-empty values
+  and reusing the stored token. Deriving the owner requires an owner segment
+  in the target URL. Deployment warns to rotate a potentially exposed token
+  before restoring an existing environment file to mode 0600.
 - **Job provisioning writes the default history ledger under the runner home.**
   The provisioner resolves the runner home before loading the history library,
   so the default ledger is `RUNNER_HOME/history/ledger.tsv`.

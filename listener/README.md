@@ -142,8 +142,8 @@ docker run --rm -e GITHUB_CONFIG_URL -e GITHUB_TOKEN -e SCALE_SET_NAME \
 | `REAP_SCRIPT` | path to `reap.sh`, the orphan-sweep entrypoint (default command on `PATH`) |
 
 Deployment sets `HOST_PROBE_CMD`, `PROVISION_SCRIPT`, and `REAP_SCRIPT` to
-their installed paths under `${LISTENER_PREFIX}/listener`. Reruns backfill missing
-settings in the mode-0600 environment file and preserve existing values.
+their installed paths under `${LISTENER_PREFIX}/listener`. Reruns backfill absent
+or empty settings in the mode-0600 environment file and preserve non-empty values.
 
 The bash seams read a few more knobs at provision/reap time:
 `RUNNER_WORK_ROOT` (parent of the per-job temp dir, default `${RUNNER_HOME}/work`
@@ -213,8 +213,12 @@ Pin the builder images by digest in production via `RUNNER_KANIKO_IMAGE` /
 ## Concurrency, capacity & lifecycle
 
 - The listener acknowledges each message envelope before batching valid
-  request IDs from its availability events. Assignment events mint JIT configs
-  by job ID and dispatch jobs to the worker pool.
+  request IDs from its availability events. Acquisition and JIT minting for an
+  acknowledged envelope continue if shutdown begins. Dispatch still observes
+  cancellation.
+- Assignment events with the same raw job ID are skipped while the first
+  assignment is pending dispatch or running. The listener can accept that ID
+  again once the worker finishes or dispatch is abandoned.
 - **Bounded worker pool (#101):** each assigned job provisions in its own
   goroutine gated by a semaphore sized to the pool bound, so the loop keeps
   long-polling; a clean shutdown drains in-flight jobs before teardown.

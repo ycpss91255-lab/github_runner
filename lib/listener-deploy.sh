@@ -314,21 +314,22 @@ listener_env_file_ready() {
 # Read a single-line value without executing the EnvironmentFile as shell code.
 listener_env_value() {
   local file=$1 key=$2 value
-  value=$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\\1/p" "${file}" | tail -n 1)
+  value=$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*[^[:space:]])?[[:space:]]*$/\\1/p" "${file}" | tail -n 1)
   case ${value} in
     \"*\"|\'*\') value=${value:1:-1} ;;
   esac
   printf '%s\n' "${value}"
 }
 
-# Emit only settings missing from the installed file, including when a
-# setting is explicitly present with an empty value.
+# Emit defaults for absent or empty settings. An empty file yields the defaults
+# for a new installation.
 listener_missing_env_defaults() {
   local file=$1 config_url=$2 types_config=$3 type_name=$4
   local prefix=${LISTENER_PREFIX:-/opt/github-runner-listener}
   local target owner assignment
   target=$(listener_env_value "${file}" GITHUB_CONFIG_URL)
   target=${target:-${config_url}}
+  target=${target%%[?#]*}
   target=${target#*://}
   owner=
   if [[ ${target} == */* ]]; then
@@ -346,7 +347,13 @@ listener_missing_env_defaults() {
     "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" \
     "REAP_SCRIPT=${prefix}/listener/reap.sh" \
     "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh"; do
-    if ! grep -qE "^[[:space:]]*${assignment%%=*}[[:space:]]*=" "${file}"; then
+    if [[ -z $(listener_env_value "${file}" "${assignment%%=*}") ]]; then
+      if [[ ${assignment} == SCALE_SET_OWNER= ]]; then
+        echo "FAIL: cannot derive SCALE_SET_OWNER from GITHUB_CONFIG_URL without an owner path segment" >&2
+        return 1
+      fi
+      # An empty default cannot fill a setting on reruns.
+      [[ -n ${assignment#*=} || ${file} == /dev/null ]] || continue
       printf '%s\n' "${assignment}"
     fi
   done
@@ -354,10 +361,11 @@ listener_missing_env_defaults() {
 
 listener_backfill_env_file() {
   local file=$1 missing
-  missing=$(listener_missing_env_defaults "$@")
+  missing=$(listener_missing_env_defaults "$@") || return 1
   if [[ -n ${missing} ]]; then
-    # The leading newline also handles legacy files without a final newline.
-    printf '\n%s\n' "${missing}" >> "${file}"
+    # The last assignment wins. The leading newline handles legacy files
+    # without a final newline.
+    printf '\n%s\n' "${missing}" >> "${file}" || return 1
     echo "  environment file: backfilled missing keys in ${file} (0600)"
   else
     echo "  environment file: ${file} already in place (0600), skipped"
@@ -377,16 +385,16 @@ listener_write_env_file() {
     echo "FAIL: no token was provided; refusing to write ${file}" >&2
     return 1
   fi
-  install -d -m 0755 "$(dirname "${file}")"
-  install -m 0600 /dev/null "${file}"
+  defaults=$(listener_missing_env_defaults /dev/null "${config_url}" "${types_config}" "${type_name}") || return 1
+  install -d -m 0755 "$(dirname "${file}")" || return 1
+  install -m 0600 /dev/null "${file}" || return 1
   {
     printf '# Written by script/deploy-listener.sh. Mode 0600, root-only.\n'
     printf '# The listener reads the token from this environment; it is never\n'
     printf '# passed on a command line and never logged.\n'
     printf 'GITHUB_TOKEN=%s\n' "${LISTENER_TOKEN}"
-  } >> "${file}"
-  defaults=$(listener_missing_env_defaults "${file}" "${config_url}" "${types_config}" "${type_name}")
-  printf '%s\n' "${defaults}" >> "${file}"
+    printf '%s\n' "${defaults}"
+  } >> "${file}" || return 1
   echo "  environment file: wrote ${file} (0600)"
 }
 

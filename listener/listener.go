@@ -231,6 +231,9 @@ type Listener struct {
 
 	trackedMu sync.Mutex     // guards tracked
 	tracked   map[string]int // canonical job id -> count of in-flight jobs sharing it (spared by the reaper, #105/#147)
+
+	assignedMu sync.Mutex
+	assigned   map[string]struct{} // raw JobIDs reserved for minting or provisioning
 }
 
 // New wires a Session + JITConfigMinter + Provisioner + Config into a Listener.
@@ -248,16 +251,17 @@ func New(session Session, minter JITConfigMinter, prov Provisioner, cfg Config) 
 		settle = defaultSettleWindow
 	}
 	return &Listener{
-		session: session,
-		minter:  minter,
-		prov:    prov,
-		cfg:     cfg,
-		bound:   bound,
-		sem:     make(chan struct{}, bound),
-		probe:   cfg.HostProbe,
-		reserve: reserve,
-		settle:  settle,
-		tracked: make(map[string]int),
+		session:  session,
+		minter:   minter,
+		prov:     prov,
+		cfg:      cfg,
+		bound:    bound,
+		sem:      make(chan struct{}, bound),
+		probe:    cfg.HostProbe,
+		reserve:  reserve,
+		settle:   settle,
+		tracked:  make(map[string]int),
+		assigned: make(map[string]struct{}),
 	}
 }
 
@@ -347,10 +351,12 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 			return err
 		}
 		lastMessageID = msg.MessageID
-		if err := l.acquire(ctx, msg.JobAvailableMessages); err != nil {
+		// Finish processing the acknowledged envelope even if shutdown begins.
+		envelopeCtx := context.WithoutCancel(ctx)
+		if err := l.acquire(envelopeCtx, msg.JobAvailableMessages); err != nil {
 			return err
 		}
-		reqs, err := l.mintAssignments(ctx, msg.JobAssignedMessages)
+		reqs, err := l.mintAssignments(envelopeCtx, msg.JobAssignedMessages)
 		if err != nil {
 			return err
 		}
@@ -377,28 +383,60 @@ func (l *Listener) acquire(ctx context.Context, jobs []*scaleset.JobAvailable) e
 	return err
 }
 
-// mintAssignments creates a provisioning request for each assigned job.
-func (l *Listener) mintAssignments(ctx context.Context, jobs []*scaleset.JobAssigned) ([]ProvisionRequest, error) {
-	var reqs []ProvisionRequest
+type assignedRequest struct {
+	ProvisionRequest
+	rawJobID string
+}
+
+func (l *Listener) reserveAssignment(rawJobID string) bool {
+	l.assignedMu.Lock()
+	defer l.assignedMu.Unlock()
+	if _, exists := l.assigned[rawJobID]; exists {
+		return false
+	}
+	l.assigned[rawJobID] = struct{}{}
+	return true
+}
+
+func (l *Listener) releaseAssignment(rawJobID string) {
+	l.assignedMu.Lock()
+	delete(l.assigned, rawJobID)
+	l.assignedMu.Unlock()
+}
+
+// mintAssignments creates a provisioning request for each new assignment.
+func (l *Listener) mintAssignments(ctx context.Context, jobs []*scaleset.JobAssigned) ([]assignedRequest, error) {
+	var reqs []assignedRequest
 	for _, ja := range jobs {
 		if ja == nil {
+			continue
+		}
+		if !l.reserveAssignment(ja.JobID) {
+			log.Printf("skipping duplicate assignment for job %q", ja.JobID)
 			continue
 		}
 		// Mint the single-use JIT config for this job via the Go client
 		// (ADR-0001: minting lives on the Go side of the boundary).
 		jit, err := l.minter.Mint(ctx, ja.JobID, ja.RequestLabels)
 		if err != nil {
+			l.releaseAssignment(ja.JobID)
+			for _, req := range reqs {
+				l.releaseAssignment(req.rawJobID)
+			}
 			return nil, err
 		}
-		reqs = append(reqs, ProvisionRequest{
-			JobID:            canonicalJobID(ja.JobID),
-			RequestID:        ja.RunnerRequestID,
-			Labels:           ja.RequestLabels,
-			EncodedJITConfig: jit,
-			Image:            l.cfg.Image,
-			Devices:          l.cfg.Devices,
-			Runtime:          l.cfg.Runtime,
-			BuildTool:        l.cfg.BuildTool,
+		reqs = append(reqs, assignedRequest{
+			rawJobID: ja.JobID,
+			ProvisionRequest: ProvisionRequest{
+				JobID:            canonicalJobID(ja.JobID),
+				RequestID:        ja.RunnerRequestID,
+				Labels:           ja.RequestLabels,
+				EncodedJITConfig: jit,
+				Image:            l.cfg.Image,
+				Devices:          l.cfg.Devices,
+				Runtime:          l.cfg.Runtime,
+				BuildTool:        l.cfg.BuildTool,
+			},
 		})
 	}
 	return reqs, nil
@@ -413,8 +451,16 @@ func (l *Listener) mintAssignments(ctx context.Context, jobs []*scaleset.JobAssi
 // other jobs are unaffected. It never ends the listen loop or closes the
 // session -- only genuine transport/session errors do that. Every dispatched
 // job is tracked on the WaitGroup so a clean shutdown drains them.
-func (l *Listener) provision(ctx context.Context, reqs []ProvisionRequest) {
-	for _, req := range reqs {
+func (l *Listener) provision(ctx context.Context, reqs []assignedRequest) {
+	defer func() {
+		for _, req := range reqs {
+			l.releaseAssignment(req.rawJobID)
+		}
+	}()
+	for len(reqs) > 0 {
+		if ctx.Err() != nil {
+			return
+		}
 		// Reactive gate (ADR-0005, #163): a single message can carry a whole
 		// matrix, so the per-poll capacity report cannot brake mid-batch -- this
 		// does. Block until the host has reserve headroom for one more job, or
@@ -429,11 +475,14 @@ func (l *Listener) provision(ctx context.Context, reqs []ProvisionRequest) {
 		case <-ctx.Done():
 			return
 		}
+		req := reqs[0]
+		reqs = reqs[1:]
 		l.wg.Add(1)
 		l.inFlight.Add(1)
 		l.track(req.JobID)
-		go func(req ProvisionRequest) {
+		go func(req assignedRequest) {
 			defer l.wg.Done()
+			defer l.releaseAssignment(req.rawJobID)
 			defer l.inFlight.Add(-1)
 			defer l.untrack(req.JobID)
 			defer func() { <-l.sem }()
@@ -441,10 +490,10 @@ func (l *Listener) provision(ctx context.Context, reqs []ProvisionRequest) {
 			// (#131). The container exit status comes from the Provision result:
 			// 0 on success, the propagated container code on a non-zero exit.
 			start := time.Now()
-			err := l.prov.Provision(ctx, req)
-			l.logJobCompleted(req, err, time.Since(start))
+			err := l.prov.Provision(ctx, req.ProvisionRequest)
+			l.logJobCompleted(req.ProvisionRequest, err, time.Since(start))
 			if err != nil {
-				l.reportJobErr(req, err)
+				l.reportJobErr(req.ProvisionRequest, err)
 			}
 		}(req)
 	}

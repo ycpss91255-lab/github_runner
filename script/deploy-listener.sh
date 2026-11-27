@@ -275,7 +275,13 @@ main() {
   #
   # Reuse the installed credential for the GitHub half on a rerun.
   if [[ -f ${LISTENER_ENV_FILE} ]]; then
-    listener_env_file_ready "${LISTENER_ENV_FILE}" || chmod 0600 "${LISTENER_ENV_FILE}"
+    local mode
+    mode=$(stat -c '%a' "${LISTENER_ENV_FILE}")
+    if [[ ${mode} != 600 ]]; then
+      printf 'WARNING: %s was mode %04d, not 0600. The token may have been exposed and should be rotated.\n' \
+        "${LISTENER_ENV_FILE}" "${mode}" >&2
+      chmod 0600 "${LISTENER_ENV_FILE}"
+    fi
     if (( ! SKIP_GITHUB )); then
       LISTENER_TOKEN=${LISTENER_TOKEN:-${GITHUB_TOKEN:-}}
       LISTENER_TOKEN=${LISTENER_TOKEN:-$(listener_env_value "${LISTENER_ENV_FILE}" GITHUB_TOKEN)}

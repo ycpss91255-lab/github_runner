@@ -181,8 +181,11 @@ sudo stat -c '%a %U' /etc/github-runner-listener/scaleset-listener.env   # -> 60
 Set `SCALE_SET_OWNER` to the owner in the target URL. Set `PROVISION_SCRIPT`,
 `REAP_SCRIPT`, and `HOST_PROBE_CMD` to the installed paths under
 `${LISTENER_PREFIX}/listener` when using a custom prefix. The deploy script sets
-these values and backfills missing keys on reruns while preserving existing
-values and keeping the file at mode 0600.
+these values and fills absent or empty settings on reruns while preserving
+non-empty values. A target URL must include an owner path segment when the
+script derives `SCALE_SET_OWNER`. If an existing environment file has a mode
+other than 0600, deployment warns that the token may have been exposed and
+should be rotated, then restores mode 0600.
 
 ## 3a. (Optional) Register a runner type via the per-type config (#110/#112/#113)
 
