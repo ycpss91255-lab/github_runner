@@ -160,23 +160,23 @@ teardown() { rm -rf "${FAKE_RH}" "${STUB}"; }
 
 # --- #140 the JIT credential file must NOT live inside the job-writable mount ---
 
-@test "runner_container_run keeps the JIT env-file OUTSIDE the bind-mounted /runner tree (#140)" {
-  # The credential file must not be visible at /runner/.jitconfig.env inside the
-  # container: the bind-mounted dir is read-write and IS the job's workdir, so a
-  # hostile job could copy the credential into /runner/_diag and have it durably
-  # archived. The --env-file path the engine reads must be a SIBLING of the
-  # mounted dir, never a child of it.
+@test "runner_container_run keeps the JIT env-file OUTSIDE the per-job runner dir (#140)" {
+  # The credential file must never sit inside the per-job dir: that dir used to
+  # be bind-mounted read-write as the job's workdir, so a hostile job could copy
+  # the credential into _diag. The dir is no longer mounted, and the --env-file
+  # the engine reads stays a SIBLING of it, never a child, so no future mount of
+  # the per-job dir can expose the credential.
   make_cli docker
   run runner_container_run "${RUNNER_DIR}" ENCODEDxJITxSECRETx== my/image:tag
   [ "${status}" -eq 0 ]
   # Grab the --env-file path that was passed to the CLI (the token after it).
   envfile=$(grep -A1 -xF -- '--env-file' "${CAP}" | tail -n1)
   [ -n "${envfile}" ]
-  # It must NOT be inside the bind-mounted runner dir (which mounts at /runner).
+  # It must NOT be inside the per-job runner dir.
   case "${envfile}" in
     "${RUNNER_DIR}"/*) echo "env-file inside the job-writable mount: ${envfile}"; return 1 ;;
   esac
-  # And no .jitconfig.env file may exist under the bind-mounted dir at all.
+  # And no .jitconfig.env file may exist under the per-job dir at all.
   [ ! -e "${RUNNER_DIR}/.jitconfig.env" ]
 }
 
@@ -350,13 +350,19 @@ teardown() { rm -rf "${FAKE_RH}" "${STUB}"; }
   ! grep -qF -- 'label=disable' "${CAP}"
 }
 
-@test "runner_container_run relabels the runner bind mount with :Z (#115)" {
+@test "runner_container_run relabels every bind mount it passes with :Z (#115)" {
+  # The per-job host dir is no longer mounted, so the opt-in socket is the only
+  # bind mount the seam can pass. Whatever it mounts must carry the :Z
+  # private-relabel suffix so the kernel relabels it instead of MAC being off.
   make_cli docker
+  export RUNNER_DOCKER_SOCKET=/var/run/docker.sock
   run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
   [ "${status}" -eq 0 ]
-  # The mount value carries the :Z private-relabel suffix so the kernel
-  # relabels the bind mount for this container instead of disabling MAC.
-  grep -qxF -- "${RUNNER_DIR}:/runner:Z" "${CAP}"
+  mounts=$(grep -A1 -xF -- '-v' "${CAP}" | grep -vxF -- '-v' | grep -vxF -- '--')
+  [ -n "${mounts}" ]
+  while IFS= read -r m; do
+    case "${m}" in *:Z) ;; *) echo "mount without :Z: ${m}"; return 1 ;; esac
+  done <<<"${mounts}"
 }
 
 # --- #116 never mount the docker socket by default; explicit opt-in only ---

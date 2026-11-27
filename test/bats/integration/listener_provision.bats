@@ -174,21 +174,22 @@ teardown() { rm -rf "${WORK}" "${STUB}"; }
 @test "provision-job.sh defaults the per-job work root under RUNNER_HOME, not /tmp (#130)" {
   # With RUNNER_WORK_ROOT unset, the per-job runner dir must be created under
   # RUNNER_HOME/work (the SEC-3 rm-root chokepoint) rather than scattered in
-  # /tmp. A stub container records the bind-mount source so we can prove where
-  # the runner dir actually lived.
+  # /tmp. The per-job dir is not mounted into the container; its path reaches the
+  # stub's argv through the credential env-file, a sibling named
+  # <runner_dir>.jitconfig.env, so we can still prove where the dir lived.
   unset RUNNER_WORK_ROOT
   export RUNNER_HOME="${WORK}/home"
   mkdir -p "${RUNNER_HOME}"
   jf=$(jit_file ENC)
   run "${SCRIPT}" job-home "${jf}" img
   [ "${status}" -eq 0 ]
-  # The runner dir bound into the container (-v <dir>:/runner:Z) was under
-  # RUNNER_HOME/work -- captured argv carries the source path before the ':'.
+  # The env-file sibling (--env-file <runner_dir>.jitconfig.env) was under
+  # RUNNER_HOME/work, so the runner dir itself was too.
   grep -qE "^${RUNNER_HOME}/work/jit-job-home\." "${CAP}"
 }
 
 @test "provision-job.sh per-job work root stays within the SEC-3 chokepoint (#130)" {
-  # The mounted runner dir -- and therefore the rm -rf teardown target -- must
+  # The per-job runner dir -- and therefore the rm -rf teardown target -- must
   # be lexically anchored under RUNNER_HOME/work, never outside it.
   unset RUNNER_WORK_ROOT
   export RUNNER_HOME="${WORK}/home"
@@ -196,8 +197,7 @@ teardown() { rm -rf "${WORK}" "${STUB}"; }
   jf=$(jit_file ENC)
   run "${SCRIPT}" job-choke "${jf}" img
   [ "${status}" -eq 0 ]
-  # No bound source path escaped the chokepoint (every -v source line for our
-  # runner dir is prefixed by RUNNER_HOME/).
+  # No per-job path on the argv (the env-file sibling) escaped the chokepoint.
   ! grep -qE '^/tmp/jit-job-choke\.' "${CAP}"
   grep -qE "^${RUNNER_HOME}/" "${CAP}"
 }
@@ -252,8 +252,10 @@ teardown() { rm -rf "${WORK}" "${STUB}"; }
 }
 
 @test "provision-job.sh never re-opens a job-controlled path, so a /runner symlink-swap cannot exfiltrate host files (#145/#154)" {
-  # A hostile job has RW access to /runner (the bind-mounted runner dir) and can
-  # `ln -sf /etc/shadow /runner/job.log`. The OLD design re-opened a captured log
+  # A hostile job that could write into a bind-mounted per-job dir could
+  # `ln -sf /etc/shadow <dir>/job.log`. The per-job dir is no longer mounted at
+  # all, so the stub below plants the symlink by hand into any per-job path it
+  # is shown. The OLD design re-opened a captured log
   # BY PATH after the container exited, dereferencing such a symlink in the HOST
   # namespace. The root-cause fix captures NO job log at all -- provision-job
   # never re-opens any path the job could influence -- so the swap is inert.
@@ -265,7 +267,7 @@ echo "name=docker" >> "${CAP}"
 printf '%s\n' "\$@" >> "${CAP}"
 for a in "\$@"; do
   case "\$a" in
-    *:/runner:Z) d="\${a%%:/runner:Z}"; ln -sf "${secret}" "\${d}/job.log" ;;
+    *.jitconfig.env) d="\${a%.jitconfig.env}"; mkdir -p "\${d}"; ln -sf "${secret}" "\${d}/job.log" ;;
   esac
 done
 echo "JOB-CONTAINER-OUTPUT"
