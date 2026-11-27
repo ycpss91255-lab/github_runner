@@ -216,6 +216,38 @@ unit per type** (copy the unit under a per-type name, each with its own
 The `image` each runner type references is produced one of two ways (ADR-0001
 "Runner images"):
 
+**CI publishes the self-built images.** The `runner images` workflow
+(`.github/workflows/runner-images.yaml`) builds the SEC-5 base and the GPU
+image on a GitHub-hosted runner, through the same script and Dockerfile shown
+below, and pushes them to:
+
+- `ghcr.io/ycpss91255-lab/runner-base:<runner-version>`
+- `ghcr.io/ycpss91255-lab/gpu-runner:<runner-version>`
+
+It runs on every push to `main` that changes `images/**`, and on demand:
+
+```sh
+# Publish now; runner_version is optional (empty = the resolved latest release).
+gh workflow run runner-images.yaml --ref main -f runner_version=2.334.0
+gh run watch "$(gh run list --workflow runner-images.yaml --limit 1 --json databaseId -q '.[0].databaseId')"
+```
+
+The run's **job summary** lists both digests and the ready-to-paste
+`image: ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line for the gpu
+type -- pin that, never the tag. Each image carries an
+`org.opencontainers.image.source` label linking the package to this repository,
+and a signed build provenance attestation you can check with
+`gh attestation verify oci://ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest> --repo ycpss91255-lab/github_runner`.
+A pull request that touches `images/**` builds both images without pushing.
+
+> **First publish.** A package an organisation publishes for the first time is
+> created **private**. Until an org owner makes it public (package settings ->
+> Change visibility), a GPU host must `docker login ghcr.io` with a token that
+> has `read:packages` before it can pull the image.
+
+The manual build below is the fallback, for a registry other than this
+organisation's or when CI is unavailable.
+
 **Self-built image, SEC-5 supply chain (#120).** Device/GPU types need a
 self-built image because stock actions-runner images can't run GPU jobs. The
 runner tarball baked into that image is obtained through the **same SEC-5 check

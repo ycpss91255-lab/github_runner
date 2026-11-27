@@ -48,7 +48,7 @@ on_block() { sed -n '/^on:/,/^[a-z]/p' "${WF}"; }
 }
 
 @test "runner-images never uses pull_request_target" {
-  run grep -E 'pull_request_target' "${WF}"
+  run bash -c "$(declare -f on_block); WF='${WF}'; on_block | grep -E '^[[:space:]]+pull_request_target:'"
   [ "${status}" -ne 0 ]
 }
 
