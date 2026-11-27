@@ -217,10 +217,14 @@ journalctl -u scaleset-listener@gpu.service -f
 The deploy command installs `scaleset-listener@.service` once and enables
 `scaleset-listener@<type>.service` for each deployed type. It creates the token
 file `/etc/github-runner-listener/<type>.env` at mode 0600 and sets
-`RUNNER_TYPE` and `RUNNER_HOME`. Each instance can write to its own
-`/opt/github-runner-listener/runners/<type>` tree, with jobs in `work/` and
-ledger data in `history/`. This keeps each instance's reaper scoped to its
-own jobs.
+`RUNNER_TYPE`, `RUNNER_HOME`, and `RUNNER_MANAGED_BY`. Each instance can
+write to its own `/opt/github-runner-listener/runners/<type>` tree, with jobs
+in `work/` and ledger data in `history/`. The reaper prunes temporary
+directories under `RUNNER_HOME/work` by default. It sweeps containers whose
+`managed-by` label matches `RUNNER_MANAGED_BY`. The default label value is
+`github-runner-listener-<type>`. Keep any overrides distinct among listeners
+that share a container engine. All types sharing a template use the same
+`--prefix`, `--etc`, and `--user` settings.
 
 Pass `--type` when the config defines multiple types. With a single entry,
 deploy resolves its name through `scaleset-admin show`. Type names must match
@@ -233,9 +237,10 @@ sudo ./script/teardown-listener.sh --type cpu --dry-run
 sudo ./script/teardown-listener.sh --type cpu
 ```
 
-The template and shared installation stay in place while another instance or
-the legacy unit remains. Omit `--type` to remove all listeners from the host.
-The scale sets on GitHub remain available to other hosts.
+Typed teardown also removes the generated `runner-types-<type>.yaml` for that
+type, if present. The template and shared installation stay in place while
+another instance or the legacy unit remains. Omit `--type` to remove all
+listeners from the host. The scale sets on GitHub remain available to other hosts.
 
 > **Live GPU validation is HITL.** The config, its loading, and auto-concurrency
 > from the GPU count are exercised AFK (the detector is stubbed in the Go tests).
@@ -246,16 +251,26 @@ The scale sets on GitHub remain available to other hosts.
 
 Run the deploy command for the type that the legacy listener serves. Use
 `--dry-run` to preview the migration and `--skip-github` if the scale set
-already exists. Deploy stops and disables `scaleset-listener.service`, moves
-`/etc/github-runner-listener/scaleset-listener.env` to `<type>.env`, and
-reuses the existing token. If `<type>.env` already exists, deploy keeps it
-and removes the legacy env file. It backfills settings, removes the old unit,
-reloads systemd, and starts the instance.
+already exists. Deploy stops and disables `scaleset-listener.service`, removes
+its unit file, and reloads systemd. It moves the legacy environment file
+`/etc/github-runner-listener/scaleset-listener.env` to `<type>.env` and reuses
+the existing token. If `<type>.env` already exists, deploy keeps it and
+removes the legacy env file. It backfills settings and starts the instance.
+If a later step fails after the legacy service stops, deploy prints a recovery
+note on stderr. Fix the reported error and rerun deploy with the same options.
 
 Deploy identifies the legacy type from `RUNNER_TYPE`, or from the only
 configured type if that setting is empty. If you deploy another type first,
 the legacy unit keeps serving its current type until you deploy that type.
-Migration leaves `/opt/github-runner-listener/runners/work` in place.
+Migration leaves `/opt/github-runner-listener/runners/work` in place. The
+legacy unit has up to 120 seconds (`TimeoutStopSec`) to drain. Legacy job
+containers that outlast the drain keep their original `managed-by` label
+(`github-runner-listener` by default). The new instance's startup and
+periodic sweeps only select its configured label, so containers with a
+different legacy label need manual cleanup. Before removing them, verify
+they belong to the retired listener and their jobs have ended. If the
+migrated environment explicitly retains the legacy label, the new instance's
+startup sweep can remove those containers as orphans.
 
 ## 3b. Build (or pin) the per-type runner images (#92: #120/#121/#122)
 

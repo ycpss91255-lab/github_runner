@@ -109,6 +109,7 @@ main() {
   assert_removable_prefix "${LISTENER_PREFIX}"
 
   local remove_legacy=1 remove_shared=1 env_file type unit reload=0
+  local legacy_type="" type_config
   local -a env_files=() units=()
   if (( TYPE_GIVEN )); then
     listener_type_paths "${TYPE_NAME}"
@@ -120,10 +121,16 @@ main() {
     env_files+=("${LISTENER_ENV_FILE}")
     units+=("${LISTENER_UNIT_NAME}")
     remove_legacy=0
-    if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]] &&
-      [[ $(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPE) == "${LISTENER_TYPE}" ]]; then
+    type_config="${LISTENER_ETC}/runner-types-${LISTENER_TYPE}.yaml"
+    if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]]; then
+      if [[ -z ${SCALESET_ADMIN_BIN:-} && -x ${LISTENER_ADMIN_BIN} ]]; then
+        SCALESET_ADMIN_BIN=${LISTENER_ADMIN_BIN}
+      fi
+      legacy_type=$(listener_legacy_type "${LISTENER_ETC}/runner-types.yaml") || legacy_type=""
+    fi
+    if [[ ${legacy_type} == "${LISTENER_TYPE}" ]]; then
       remove_legacy=1
-    elif [[ -e ${LISTENER_LEGACY_UNIT_PATH} || -L ${LISTENER_LEGACY_UNIT_PATH} ]]; then
+    elif [[ -f ${LISTENER_LEGACY_ENV_FILE} || -e ${LISTENER_LEGACY_UNIT_PATH} || -L ${LISTENER_LEGACY_UNIT_PATH} ]]; then
       remove_shared=0
     fi
   fi
@@ -159,6 +166,7 @@ main() {
     echo "  Remove unit:      ${LISTENER_LEGACY_UNIT_PATH}"
   fi
   if (( TYPE_GIVEN )); then
+    echo "  Remove config:    ${type_config}"
     echo "  Remove state:     ${LISTENER_RUNNER_HOME}"
   fi
   if (( remove_shared )); then
@@ -200,6 +208,10 @@ main() {
     fi
   done
   if (( TYPE_GIVEN )); then
+    if [[ -e ${type_config} || -L ${type_config} ]]; then
+      rm -- "${type_config}"
+      echo "  removed config:   ${type_config}"
+    fi
     rm -rf -- "${LISTENER_RUNNER_HOME}"
     echo "  removed state:    ${LISTENER_RUNNER_HOME}"
   fi

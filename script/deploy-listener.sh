@@ -146,8 +146,20 @@ resolve_config() {
   fi
 }
 
+migration_recovery_note() {
+  local status=$1
+  if (( status != 0 )); then
+    echo "NOTE: the legacy listener was stopped or was already inactive." >&2
+    echo "      Fix the error above, then rerun deploy with the same options to start ${LISTENER_UNIT_NAME}." >&2
+  fi
+}
+
 migrate_legacy_listener() {
-  listener_stop_disable_unit "${LISTENER_LEGACY_UNIT_NAME}"
+  listener_stop_unit "${LISTENER_LEGACY_UNIT_NAME}"
+  trap 'migration_recovery_note "$?"' EXIT
+  listener_disable_unit "${LISTENER_LEGACY_UNIT_NAME}"
+  rm -f -- "${LISTENER_LEGACY_UNIT_PATH}"
+  _systemctl daemon-reload
   if [[ -f ${LISTENER_ENV_FILE} ]]; then
     rm -- "${LISTENER_LEGACY_ENV_FILE}"
     echo "  migrated:         removed ${LISTENER_LEGACY_ENV_FILE}; kept ${LISTENER_ENV_FILE}"
@@ -156,8 +168,6 @@ migrate_legacy_listener() {
     echo "  migrated:         moved ${LISTENER_LEGACY_ENV_FILE} to ${LISTENER_ENV_FILE} (0600)"
   fi
   listener_backfill_env_file "${LISTENER_ENV_FILE}" "${CONFIG_URL}" "${TYPES_CONFIG}" "${LISTENER_TYPE}"
-  rm -f -- "${LISTENER_LEGACY_UNIT_PATH}"
-  _systemctl daemon-reload
   echo "  migrated:         retired ${LISTENER_LEGACY_UNIT_NAME} and reloaded systemd"
   echo "  NOTE:             legacy work root ${LISTENER_PREFIX}/runners/work left in place"
 }
@@ -219,28 +229,14 @@ main() {
     echo "      (name one with --type when the config holds more than one)" >&2
     exit 1
   fi
-  local single_type=""
   if (( ! TYPE_GIVEN )); then
     TYPE_NAME=$(listener_config_name "${TYPES_CONFIG}" "")
-    single_type=${TYPE_NAME}
     listener_type_paths "${TYPE_NAME}"
   fi
 
   local migrate_legacy=0 legacy_type="" credential_file=${LISTENER_ENV_FILE}
   if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]]; then
-    legacy_type=$(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPE)
-    # A legacy listener without RUNNER_TYPE can only select the sole type in
-    # its own config. The new deployment may point at a different file.
-    if [[ -z ${legacy_type} ]]; then
-      local legacy_config
-      legacy_config=$(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPES_CONFIG)
-      legacy_config=${legacy_config:-${TYPES_CONFIG}}
-      if [[ ${legacy_config} == "${TYPES_CONFIG}" && -n ${single_type} ]]; then
-        legacy_type=${single_type}
-      else
-        legacy_type=$(listener_config_name "${legacy_config}" "" 2>/dev/null) || legacy_type=""
-      fi
-    fi
+    legacy_type=$(listener_legacy_type "${TYPES_CONFIG}") || legacy_type=""
     if [[ ${legacy_type} == "${LISTENER_TYPE}" ]]; then
       migrate_legacy=1
       [[ -f ${credential_file} ]] || credential_file=${LISTENER_LEGACY_ENV_FILE}
@@ -402,12 +398,7 @@ main() {
       "${TYPES_CONFIG}" "${TYPE_NAME}"
   fi
 
-  local unit_src="${REPO_ROOT}/deploy/${LISTENER_TEMPLATE_UNIT_NAME}"
-  if listener_unit_current "${unit_src}" "${LISTENER_UNIT_PATH}"; then
-    echo "  systemd unit:     ${LISTENER_UNIT_PATH} already current, skipped"
-  else
-    listener_install_unit "${unit_src}" "${LISTENER_UNIT_PATH}"
-  fi
+  listener_deploy_template "${REPO_ROOT}/deploy/${LISTENER_TEMPLATE_UNIT_NAME}" "${SERVICE_USER}"
 
   listener_enable_unit "${LISTENER_UNIT_NAME}"
   listener_start_unit "${LISTENER_UNIT_NAME}"

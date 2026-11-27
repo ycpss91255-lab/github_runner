@@ -11,10 +11,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Deploy several runner types on one host.** `script/deploy-listener.sh`
   installs a shared systemd template and starts one instance per runner type.
   Each instance has its own 0600 environment file and writable runner state
-  tree. Deploying the type served by a legacy single-unit listener migrates
-  it and reuses its token when the per-type file is absent.
-  `script/teardown-listener.sh --type <name>` removes one instance and keeps
-  the shared installation while other listeners remain.
+  tree, and the container reaper defaults to a per-type `RUNNER_MANAGED_BY`
+  label value. Deploying the type served by a legacy single-unit listener
+  migrates it and reuses its token when the per-type file is absent.
+  Deploy selects the type from `--type` or the sole config entry. Scripts
+  that previously set `RUNNER_TYPE` to select a type must pass `--type`.
+  `script/teardown-listener.sh --type <name>` removes one instance and its
+  generated config while keeping the shared installation for other listeners.
 
 - **CI builds and publishes the self-built runner images to ghcr.io.** The new
   `runner images` workflow builds `ghcr.io/ycpss91255-lab/runner-base` and

@@ -340,6 +340,17 @@ listener_env_value() {
   printf '%s\n' "${value}"
 }
 
+# A legacy env without RUNNER_TYPE can only select the sole type in its config.
+listener_legacy_type() {
+  local fallback_config=$1 type config
+  type=$(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPE)
+  if [[ -z ${type} ]]; then
+    config=$(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPES_CONFIG)
+    type=$(listener_config_name "${config:-${fallback_config}}" "" 2>/dev/null) || return 1
+  fi
+  printf '%s\n' "${type}"
+}
+
 # Emit defaults for absent or empty settings and relative script paths.
 # An empty file yields the defaults for a new installation.
 listener_missing_env_defaults() {
@@ -356,6 +367,7 @@ listener_missing_env_defaults() {
     "GITHUB_CONFIG_URL=${config_url}" \
     "RUNNER_TYPES_CONFIG=${types_config}" \
     "RUNNER_TYPE=${type_name}" \
+    "RUNNER_MANAGED_BY=github-runner-listener-${type_name}" \
     "RUNNER_HOME=${prefix}/runners/${type_name}" \
     "SCALE_SET_OWNER=${owner}" \
     "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" \
@@ -416,7 +428,7 @@ listener_write_env_file() {
 
 # --- the systemd unit -------------------------------------------------------
 
-# True when the installed unit exists and matches the one in the repo, so an
+# True when the installed unit exists and matches the desired unit, so an
 # unchanged unit is not reinstalled and a DRIFTED one is not left in place.
 listener_unit_current() {
   local src=$1 dst=$2
@@ -432,20 +444,50 @@ listener_install_unit() {
   echo "  systemd unit:     installed ${dst}"
 }
 
+listener_deploy_template() (
+  local src=$1 user=$2 rendered prefix etc
+  rendered=$(mktemp)
+  trap 'rm -f -- "${rendered}"' EXIT
+
+  # Escape sed replacement characters in the configured paths.
+  prefix=$(printf '%s' "${LISTENER_PREFIX}" | sed 's/[\\&|]/\\&/g')
+  etc=$(printf '%s' "${LISTENER_ETC}" | sed 's/[\\&|]/\\&/g')
+  user=$(printf '%s' "${user}" | sed 's/[\\&|]/\\&/g')
+  sed -e "s|^EnvironmentFile=/etc/github-runner-listener/|EnvironmentFile=${etc}/|" \
+    -e "/^\(WorkingDirectory\|ExecStart\|ReadWritePaths\)=/s|=/opt/github-runner-listener/|=${prefix}/|" \
+    -e "s|^User=ci-runner$|User=${user}|" \
+    -e "s|^Group=ci-runner$|Group=${user}|" "${src}" > "${rendered}"
+
+  if listener_unit_current "${rendered}" "${LISTENER_UNIT_PATH}"; then
+    echo "  systemd unit:     ${LISTENER_UNIT_PATH} already current, skipped"
+  else
+    listener_install_unit "${rendered}" "${LISTENER_UNIT_PATH}"
+  fi
+)
+
 listener_unit_enabled() { _systemctl is-enabled "$1" >/dev/null 2>&1; }
 listener_unit_active()  { _systemctl is-active  "$1" >/dev/null 2>&1; }
 
 # Retire the service before removing the files it needs to drain or restart.
-listener_stop_disable_unit() {
+listener_stop_unit() {
   local unit=$1
   if listener_unit_active "${unit}"; then
     _systemctl stop "${unit}"
     echo "  stopped:          ${unit}"
   fi
+}
+
+listener_disable_unit() {
+  local unit=$1
   if listener_unit_enabled "${unit}"; then
     _systemctl disable "${unit}" >/dev/null
     echo "  disabled:         ${unit}"
   fi
+}
+
+listener_stop_disable_unit() {
+  listener_stop_unit "$1"
+  listener_disable_unit "$1"
 }
 
 listener_enable_unit() {
