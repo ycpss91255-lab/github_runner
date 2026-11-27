@@ -38,6 +38,8 @@ setup() {
 
   STUB=$(mktemp -d)
   CAP="${WORK}/cli.args"
+  MODE_CAP="${WORK}/workdir.mode"
+  unset RUNNER_DOCKER_SOCKET RUNNER_JOB_WORKDIR
   # A docker stub records the cli name + full argv (one token per line so --rm /
   # the image / the passed-through run command can be grepped exactly), then
   # exits CLI_RC (default 0) so teardown / failure propagation can be asserted.
@@ -45,11 +47,19 @@ setup() {
 #!/usr/bin/env bash
 echo "name=docker" >> "${CAP}"
 printf '%s\n' "\$@" >> "${CAP}"
+for arg in "\$@"; do
+  if [[ -n "\${RUNNER_JOB_WORKDIR:-}" &&
+        "\$arg" == "\${RUNNER_JOB_WORKDIR}:\${RUNNER_JOB_WORKDIR}:Z" ]]; then
+    stat -c %a -- "\${RUNNER_JOB_WORKDIR}" > "${MODE_CAP}"
+    touch -- "\${RUNNER_JOB_WORKDIR}/job-output"
+  fi
+done
 # Emit a recognisable line on stdout so the captured job log (#125) is non-empty.
 echo "JOB-CONTAINER-OUTPUT"
 exit \${CLI_RC:-0}
 EOF
   chmod +x "${STUB}/docker"
+  ln -s docker "${STUB}/podman"
   # Clean PATH: only our stub plus system bins, so the seam's container-CLI
   # detection sees exactly the stub (no host docker/podman leaking in).
   PATH="${STUB}:/bin:/usr/bin"
@@ -374,4 +384,115 @@ STUB
   [ "${status}" -eq 0 ]
   grep -qxF run "${CAP}"
   grep -qF $'\tjob_id=job-default-history\t' "${prefix}/runners/history/ledger.tsv"
+}
+
+
+socket_job() {
+  export RUNNER_DOCKER_SOCKET="${WORK}/docker.sock"
+  export RUNNER_JOB_WORKDIR="${RUNNER_WORK_ROOT}/jit-job-abc.0123abcd"
+  touch "${RUNNER_DOCKER_SOCKET}"
+}
+
+assert_socket_job() {
+  export CLI_RC="$1"
+  socket_job
+  run "${SCRIPT}" job-abc "$(jit_file ENC)" img
+  [ "${status}" -eq "${CLI_RC}" ]
+  grep -A1 -xF -- '-v' "${CAP}" | grep -qxF -- "${RUNNER_JOB_WORKDIR}:${RUNNER_JOB_WORKDIR}:Z"
+  [ "$(cat "${MODE_CAP}")" = 777 ]
+  [ ! -e "${RUNNER_JOB_WORKDIR}" ]
+}
+
+@test "provision-job.sh creates, mounts and cleans up the socket workdir after success" {
+  assert_socket_job 0
+}
+
+@test "provision-job.sh creates, mounts and cleans up the socket workdir after job failure" {
+  assert_socket_job 7
+}
+
+assert_invalid_workdir() {
+  export RUNNER_JOB_WORKDIR="$1"
+  run "${SCRIPT}" job-abc "$(jit_file ENC)" img
+  [ "${status}" -eq 2 ]
+  [[ "${output}" == *FAIL* ]]
+  [ ! -e "${CAP}" ]
+}
+
+@test "provision-job.sh rejects a missing socket workdir" {
+  socket_job
+  assert_invalid_workdir ''
+}
+
+@test "provision-job.sh rejects a relative socket workdir" {
+  socket_job
+  assert_invalid_workdir 'work/jit-job-abc.0123abcd'
+}
+
+@test "provision-job.sh rejects a socket workdir outside the work root" {
+  socket_job
+  assert_invalid_workdir "${WORK}/jit-job-abc.0123abcd"
+}
+
+@test "provision-job.sh rejects a socket workdir containing a parent component" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_WORK_ROOT}/../work/jit-job-abc.0123abcd"
+}
+
+@test "provision-job.sh rejects a socket workdir containing doubled slashes" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_WORK_ROOT}//jit-job-abc.0123abcd"
+}
+
+@test "provision-job.sh rejects a socket workdir ending in a slash" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR}/"
+}
+
+@test "provision-job.sh rejects a socket workdir for another job id" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_WORK_ROOT}/jit-job-other.0123abcd"
+}
+
+@test "provision-job.sh rejects an existing socket workdir" {
+  socket_job
+  mkdir "${RUNNER_JOB_WORKDIR}"
+  touch "${RUNNER_JOB_WORKDIR}/keep"
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR}"
+  [ -f "${RUNNER_JOB_WORKDIR}/keep" ]
+}
+
+@test "provision-job.sh rejects a socket workdir symlink" {
+  socket_job
+  mkdir "${WORK}/target"
+  ln -s "${WORK}/target" "${RUNNER_JOB_WORKDIR}"
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR}"
+  [ -L "${RUNNER_JOB_WORKDIR}" ]
+  [ -d "${WORK}/target" ]
+}
+
+@test "provision-job.sh rejects a colon in the socket workdir" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR}:bad"
+}
+
+@test "provision-job.sh rejects whitespace in the socket workdir" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR} bad"
+}
+
+@test "provision-job.sh rejects a control character in the socket workdir" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_JOB_WORKDIR}"$'\001'
+}
+
+@test "provision-job.sh ignores RUNNER_JOB_WORKDIR with the socket off" {
+  export RUNNER_JOB_WORKDIR="${RUNNER_WORK_ROOT}/jit-job-abc.0123abcd"
+  export RUNNER_DOCKER_SOCKET=''
+  run "${SCRIPT}" job-abc "$(jit_file ENC)" img
+  [ "${status}" -eq 0 ]
+  grep -qxF -- run "${CAP}"
+  ! grep -qxF -- '-v' "${CAP}" || false
+  [ ! -e "${MODE_CAP}" ]
+  [ ! -e "${RUNNER_JOB_WORKDIR}" ]
 }
