@@ -106,7 +106,12 @@ jobs:
           set -euo pipefail
           docker run --rm runner-cpu:ci docker compose version
           docker run --rm runner-cpu:ci docker buildx version
-          docker run --rm runner-cpu:ci ./bin/Runner.Listener --version
+          version=$(docker run --rm runner-cpu:ci env -u ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT ./bin/Runner.Listener --version)
+          echo "${version}"
+          [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::runner-cpu reports an invalid runner version: ${version}"
+            exit 1
+          }
 
       - name: the baked runner reports the resolved version
         env:
@@ -240,7 +245,8 @@ jobs:
             --label "org.opencontainers.image.base.name=${base}" \
             --label "org.opencontainers.image.base.digest=${base##*@}" \
             -t runner-cpu:build "${ctx}"
-          version=$(docker run --rm runner-cpu:build ./bin/Runner.Listener --version)
+          # The upstream image sets this variable to enable tracing on stdout.
+          version=$(docker run --rm runner-cpu:build env -u ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT ./bin/Runner.Listener --version)
           [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
             echo "::error::runner-cpu reports an invalid runner version: ${version}"
             exit 1
@@ -248,7 +254,7 @@ jobs:
           docker run --rm runner-cpu:build docker compose version
           docker run --rm runner-cpu:build docker buildx version
           ref="${CPU_IMAGE_NAME}:${version}"
-          docker tag runner-cpu:build "${ref}"
+          printf 'FROM runner-cpu:build\n' | docker build --label "org.opencontainers.image.version=${version}" -t "${ref}" -
           docker push "${ref}"
           digest=$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' | jq -r .digest)
           [[ ${digest} =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for ${ref}"; exit 1; }
