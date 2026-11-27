@@ -102,9 +102,11 @@ fallback_version() {
   [ "$(fallback_version)" = "${CURRENT_VERSION}" ]
 }
 
+# The fleet restore log (doc/runbook/FLEET.md) is history: it names the old
+# version because the backup files on the hosts carry it, so it is exempt.
 @test "obsolete runner digest and version are absent from shipped files" {
   run grep -rIFn --exclude-dir=.git --exclude-dir=test --exclude-dir=coverage \
-    --exclude=coverage.func --exclude='*_test.go' \
+    --exclude=coverage.func --exclude='*_test.go' --exclude=FLEET.md \
     -e '08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29' \
     -e '2.335.1' "${ROOT}"
   [ "${status}" -eq 1 ]
