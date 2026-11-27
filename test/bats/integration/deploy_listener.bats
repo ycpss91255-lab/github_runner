@@ -10,6 +10,8 @@
 # talks to GitHub: systemctl / journalctl / useradd / id / just and
 # scaleset-admin are all stubs that record their argv.
 
+bats_require_minimum_version 1.5.0
+
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   SCRIPT="${ROOT}/script/deploy-listener.sh"
@@ -65,7 +67,12 @@ if [ "${STUB_USER_EXISTS}" = 1 ]; then echo 999; exit 0; fi; exit 1'
   _mkstub usermod 'exit 0'
   local real_install
   real_install=$(command -v install)
-  _mkstub install "exec \"${real_install}\" \"\$@\""
+  _mkstub install "
+if [ \"\${STUB_FAIL_TEMPLATE_INSTALL:-0}\" = 1 ] &&
+   [ \"\${!#}\" = \"\${LISTENER_UNIT_DIR}/scaleset-listener@.service\" ]; then
+  exit 1
+fi
+exec \"${real_install}\" \"\$@\""
   _mkstub chown 'exit 0'
   # A started unit becomes active, the way a real one does -- otherwise the
   # verification step could never pass and the test would be asserting against
@@ -82,7 +89,9 @@ case "$1" in
     echo disabled; exit 1 ;;
   enable) : > "${STUB_STATE}/$2.enabled"; exit 0 ;;
   disable) rm -f "${STUB_STATE}/$2.enabled"; exit 0 ;;
-  start|restart) : > "${STUB_STATE}/$2.started"; exit 0 ;;
+  start|restart)
+    [ "$2" = "${STUB_FAIL_START_UNIT:-}" ] && exit 1
+    : > "${STUB_STATE}/$2.started"; exit 0 ;;
   stop) rm -f "${STUB_STATE}/$2.started"; exit 0 ;;
   *) exit 0 ;;
 esac'
@@ -339,10 +348,10 @@ EOF
   _systemctl_called restart scaleset-listener@gpu.service
 }
 
-@test "redeploy skips the current template, backfills runner home and restarts the instance" {
+@test "redeploy skips the current template, backfills missing runner settings and restarts the instance" {
   run _deploy
   [ "${status}" -eq 0 ]
-  sed -i '/^RUNNER_HOME=/d' "${ETC}/gpu.env"
+  sed -i '/^RUNNER_HOME=/d; /^RUNNER_MANAGED_BY=/d' "${ETC}/gpu.env"
   export STUB_USER_EXISTS=1 STUB_UNIT_ENABLED=1 STUB_UNIT_ACTIVE=1 STUB_SCALE_SET_EXISTS=1
   : > "${CAP}"
   run _deploy_host --type gpu </dev/null
@@ -353,6 +362,17 @@ EOF
   grep -qxF 'GITHUB_TOKEN=tok-abc123' "${ETC}/gpu.env"
   ! grep -qxF "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${CAP}" || false
   _systemctl_called restart scaleset-listener@gpu.service
+  grep -qxF 'RUNNER_MANAGED_BY=github-runner-listener-gpu' "${ETC}/gpu.env"
+}
+
+@test "redeploy keeps an explicit RUNNER_MANAGED_BY without appending an override" {
+  mkdir -p "${ETC}"
+  install -m 0600 /dev/null "${ETC}/gpu.env"
+  printf '%s\n' 'GITHUB_TOKEN=already' 'RUNNER_MANAGED_BY=custom-gpu' > "${ETC}/gpu.env"
+
+  run _deploy_host --type gpu --skip-github </dev/null
+  [ "${status}" -eq 0 ]
+  [ "$(grep '^RUNNER_MANAGED_BY=' "${ETC}/gpu.env")" = 'RUNNER_MANAGED_BY=custom-gpu' ]
 }
 
 # --- one command means one command -----------------------------------------
@@ -531,6 +551,7 @@ YAML
   run _deploy --skip-github
   [ "${status}" -eq 0 ]
   cp "${ETC}/gpu.env" "${WORK}/gpu.before"
+  cp "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${WORK}/template.before"
   _systemctl_called enable scaleset-listener@gpu.service
   _systemctl_called start scaleset-listener@gpu.service
   [ "$(grep -xcF "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${CAP}")" -eq 1 ]
@@ -547,13 +568,17 @@ YAML
     grep -qxF "RUNNER_HOME=${PREFIX}/runners/${type}" "${file}"
     [ -d "${PREFIX}/runners/${type}/work" ]
   done
-  cmp "${ROOT}/deploy/scaleset-listener@.service" "${LISTENER_UNIT_DIR}/scaleset-listener@.service"
+  cmp "${WORK}/template.before" "${LISTENER_UNIT_DIR}/scaleset-listener@.service"
   [ ! -e "${LISTENER_UNIT_DIR}/scaleset-listener.service" ]
   [ ! -e "${ETC}/scaleset-listener.env" ]
   ! grep -qxF "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${CAP}" || false
   ! grep -qxF 'scaleset-listener@gpu.service' "${CAP}" || false
   _systemctl_called enable scaleset-listener@cpu.service
   _systemctl_called start scaleset-listener@cpu.service
+  diff -u <(printf '%s\n' \
+    'RUNNER_MANAGED_BY=github-runner-listener-gpu' \
+    'RUNNER_MANAGED_BY=github-runner-listener-cpu') \
+    <(sed -n '/^RUNNER_MANAGED_BY=/p' "${ETC}/gpu.env" "${ETC}/cpu.env")
 }
 
 @test "deploy without --type uses the single type returned by scaleset-admin show" {
@@ -603,6 +628,32 @@ YAML
   ! grep -qxF 'scaleset-listener.service' "${CAP}" || false
   ! grep -qF 'legacy-secret' "${CAP}" || false
   grep -qxF 'GITHUB_TOKEN=legacy-secret' "${ETC}/gpu.env"
+  grep -qxF 'RUNNER_MANAGED_BY=github-runner-listener-gpu' "${ETC}/gpu.env"
+}
+
+_assert_migration_failure_note() {
+  [ "${status}" -ne 0 ]
+  _systemctl_called stop scaleset-listener.service
+  grep -qiE 'NOTE:.*(legacy.*stopped|stopped.*legacy)' <<< "${stderr}"
+  grep -qiE '(rerun|re-run|retry|restart|restore)' <<< "${stderr}"
+}
+
+@test "a template install failure after stopping the legacy listener gives recovery advice on stderr" {
+  _seed_legacy
+  export STUB_FAIL_TEMPLATE_INSTALL=1
+
+  run --separate-stderr _deploy_host --type gpu --skip-github </dev/null
+  grep -qxF "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${CAP}"
+  _assert_migration_failure_note
+}
+
+@test "an instance start failure after stopping the legacy listener gives recovery advice on stderr" {
+  _seed_legacy
+  export STUB_FAIL_START_UNIT=scaleset-listener@gpu.service
+
+  run --separate-stderr _deploy_host --type gpu --skip-github </dev/null
+  _systemctl_called start scaleset-listener@gpu.service
+  _assert_migration_failure_note
 }
 
 @test "deploy keeps a legacy listener serving a different type" {
@@ -638,16 +689,26 @@ YAML
   ! grep -qxE 'create|install-listener|name=install|name=systemctl' "${CAP}" || false
 }
 
-@test "the shipped unit grants write access to exactly the runner home the deploy creates" {
+@test "the installed unit uses the deploy paths and grants write access to its runner home" {
   run _deploy --skip-github
   [ "${status}" -eq 0 ]
   local unit="${LISTENER_UNIT_DIR}/scaleset-listener@.service" runner_home
   grep -qxF 'ProtectSystem=strict' "${unit}"
   runner_home=$(sed -n 's/^RUNNER_HOME=//p' "${ETC}/gpu.env")
   [ -d "${runner_home}/work" ]
-  [ "$(sed -n 's|^ReadWritePaths=/opt/github-runner-listener/||p' "${unit}")" = "runners/%i" ]
-  [ "${runner_home#"${PREFIX}/"}" = 'runners/gpu' ]
-  grep -qxF 'ExecStart=/opt/github-runner-listener/bin/scaleset-listener' "${unit}"
+  [ "${runner_home}" = "${PREFIX}/runners/gpu" ]
+  grep -qxF "ReadWritePaths=${PREFIX}/runners/%i" "${unit}"
+  grep -qxF "ExecStart=${PREFIX}/bin/scaleset-listener" "${unit}"
+  grep -qxF "WorkingDirectory=${PREFIX}/listener" "${unit}"
+  grep -qxF "EnvironmentFile=${ETC}/%i.env" "${unit}"
+}
+
+@test "the installed unit runs as the user selected by --user" {
+  run _deploy --skip-github --user runner-custom
+  [ "${status}" -eq 0 ]
+  local unit="${LISTENER_UNIT_DIR}/scaleset-listener@.service"
+  grep -qxF 'User=runner-custom' "${unit}"
+  grep -qxF 'Group=runner-custom' "${unit}"
 }
 
 @test "deploy migrates a legacy env without RUNNER_TYPE when show resolves the only type" {

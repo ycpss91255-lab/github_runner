@@ -226,3 +226,58 @@ _assert_unit_stopped_and_disabled() {
   [ ! -e "${UNIT_DIR}/scaleset-listener@.service" ]
   [ ! -e "${PREFIX}" ]
 }
+
+@test "typed teardown resolves a legacy env without RUNNER_TYPE from its single-type config" {
+  local config="${ETC}/runner-types.yaml"
+  cat > "${config}" <<'YAML'
+runner_types:
+  - name: gpu
+    scale_set: gpu-runners
+    labels: [self-hosted, linux, gpu]
+    image: ghcr.io/acme/r@sha256:abc
+YAML
+  printf 'RUNNER_TYPES_CONFIG=%s\n' "${config}" >> "${ETC}/scaleset-listener.env"
+  cat > "${STUB}/scaleset-admin" <<'EOF'
+#!/usr/bin/env bash
+[[ $# -eq 3 && $1 == show && $2 == --config && $3 == "${STUB_LEGACY_CONFIG}" ]] || exit 64
+printf '%s\n' 'name=gpu'
+EOF
+  chmod +x "${STUB}/scaleset-admin"
+  export STUB_LEGACY_CONFIG="${config}" SCALESET_ADMIN_BIN="${STUB}/scaleset-admin"
+
+  run _teardown_run --type cpu
+  [ "${status}" -eq 0 ]
+  [ -f "${ETC}/scaleset-listener.env" ]
+  [ -f "${UNIT_DIR}/scaleset-listener.service" ]
+  ! grep -qxF 'scaleset-listener.service' "${CAP}" || false
+
+  run _teardown_run --type gpu
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener.service
+  [ ! -e "${ETC}/scaleset-listener.env" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener.service" ]
+}
+
+@test "typed teardown removes only the selected generated runner-type config" {
+  _seed_instances
+  touch "${ETC}/runner-types-cpu.yaml" "${ETC}/runner-types-gpu.yaml" "${ETC}/runner-types.yaml"
+
+  run _teardown_run --type cpu
+  [ "${status}" -eq 0 ]
+  [ ! -e "${ETC}/runner-types-cpu.yaml" ]
+  [ -f "${ETC}/runner-types-gpu.yaml" ]
+  [ -f "${ETC}/runner-types.yaml" ]
+}
+
+@test "typed teardown dry run previews removal of the selected generated config" {
+  _seed_instances
+  touch "${ETC}/runner-types-cpu.yaml" "${ETC}/runner-types-gpu.yaml"
+
+  run _teardown_run --type cpu --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"${ETC}/runner-types-cpu.yaml"* ]]
+  [[ "${output}" != *"${ETC}/runner-types-gpu.yaml"* ]]
+  [ -f "${ETC}/runner-types-cpu.yaml" ]
+  [ -f "${ETC}/runner-types-gpu.yaml" ]
+  [ ! -s "${CAP}" ]
+}

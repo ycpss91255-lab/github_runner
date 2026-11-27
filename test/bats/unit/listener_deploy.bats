@@ -367,6 +367,22 @@ teardown() { rm -rf "${WORK}"; }
   [[ "${output}" == *"SYSTEMCTL daemon-reload"* ]]
 }
 
+@test "installing the listener template with default paths preserves the shipped content" {
+  local src="${ROOT}/deploy/scaleset-listener@.service"
+  run bash -c '
+    set -e
+    source "$1"
+    unset LISTENER_PREFIX LISTENER_ETC
+    LISTENER_UNIT_DIR=$3
+    SERVICE_USER=ci-runner
+    listener_deploy_paths
+    _systemctl() { :; }
+    listener_install_unit "$2" "${LISTENER_UNIT_PATH}"
+  ' _ "${LIB}" "${src}" "${WORK}/systemd"
+  [ "${status}" -eq 0 ]
+  cmp "${src}" "${WORK}/systemd/scaleset-listener@.service"
+}
+
 @test "listener_unit_enabled / listener_unit_active read systemd, not a guess" {
   run bash -c "
     source '${LIB}'
