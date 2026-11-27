@@ -12,8 +12,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `images/runner-cpu.Dockerfile` builds `ghcr.io/ycpss91255-lab/runner-cpu`
   with Docker Compose v5.7.1 and Buildx v0.39.0, both verified by SHA-256.
   On the stock image, `docker compose` failed with "unknown shorthand flag 'f'"
-  when passed a Compose file. The CPU sample keeps the stock digest until the
-  first publish.
+  when passed a Compose file.
 - **Same-path work folders for Docker socket jobs.** Socket-enabled runner
   types use a per-job work folder mounted at the same path on the host and in
   the runner. Compose and other sibling containers can bind-mount the checkout.
@@ -105,6 +104,14 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   be checked against the one thing most worth checking. It now prints a `Target:`
   line with the resolved scope beside it, which matters most for a repository
   target, where naming the wrong one is an easy slip.
+
+### Changed
+
+- **The sample CPU runner type uses the published runner-cpu image.**
+  `deploy/runner-types.sample.yaml` now pins
+  `ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f`
+  (runner 2.338.2) instead of the stock actions-runner image, so jobs on the
+  sample CPU type can run `docker compose`.
 
 ### Removed
 

@@ -373,10 +373,15 @@ against SHA-256 checksums from the official GitHub releases. The CPU tag
 comes from the runner binary in the digest-pinned upstream image.
 The workflow's `runner_version` input selects the base and GPU versions.
 
-The sample uses the stock digest until the first CPU image publish. After
-that publish, copy the digest from the workflow's job summary and set the
-CPU type's `image:` to `ghcr.io/ycpss91255-lab/runner-cpu@sha256:<digest>`.
-You can also look up the published digest by tag.
+The first CPU image publish is done and the package is public. The sample's
+CPU type pins it by digest (runner 2.338.2):
+
+```yaml
+image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f
+```
+
+The workflow's job summary lists the digest of each publish. You can also look
+up the published digest by tag.
 
 ```sh
 docker buildx imagetools inspect ghcr.io/ycpss91255-lab/runner-cpu:2.338.2
@@ -389,9 +394,10 @@ docker build -f images/runner-cpu.Dockerfile -t runner-cpu:2.338.2 .
 docker run --rm runner-cpu:2.338.2 docker compose version
 ```
 
-When bumping the stock digest in `images/runner-cpu.Dockerfile`, update the
-sample digest, the `# actions-runner X.Y.Z` version comments, and
-`RUNNER_VERSION_FALLBACK` in `lib/runner-release.sh` together.
+When bumping the stock digest in `images/runner-cpu.Dockerfile`, republish the
+CPU image, then update the sample's runner-cpu digest, the
+`# actions-runner X.Y.Z` version comments, and `RUNNER_VERSION_FALLBACK` in
+`lib/runner-release.sh` together.
 
 ## 3c. Create the runner type's scale set on GitHub (`scaleset-admin`)
 
