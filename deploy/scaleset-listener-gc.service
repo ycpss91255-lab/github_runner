@@ -1,0 +1,31 @@
+[Unit]
+# The CI-owned Docker GC (listener/docker-gc.sh), started daily by
+# scaleset-listener-gc.timer. It removes only digest-pulled CI runner images
+# no runner-type config references and no container uses, and empty
+# <project>_default compose networks of listed projects older than 24h. It never
+# touches volumes, builders, other repositories' images or gitlab objects.
+#
+# Installed and enabled by script/deploy-listener.sh, removed by
+# script/teardown-listener.sh. Turn it off without removing it:
+#   sudo systemctl disable --now scaleset-listener-gc.timer
+Description=GitHub scale-set listener: conservative Docker GC of CI residue
+Documentation=https://github.com/ycpss91255-lab/github_runner
+Wants=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# Root, because it reads the runner-type configs and the RUNNER_TYPES_CONFIG key
+# of the 0600 root-owned environment files to build its keep-set. Docker socket
+# access is root-equivalent anyway; the hardening below limits the rest.
+User=root
+ExecStart=/opt/github-runner-listener/listener/docker-gc.sh --apply --etc /etc/github-runner-listener
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectControlGroups=true

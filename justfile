@@ -21,7 +21,7 @@ TEST_TOOLS_IMAGE := env_var_or_default('TEST_TOOLS_IMAGE', 'ghcr.io/ycpss91255-l
 # recipe below. Override with COVERAGE_IMAGE=... if you want to pin a tag.
 COVERAGE_IMAGE := env_var_or_default('COVERAGE_IMAGE', 'kcov/kcov:latest')
 
-SCRIPTS := 'script/install-deps.sh script/init.sh script/add-runner.sh script/remove-runner.sh script/status.sh script/update.sh script/uninstall.sh script/cleanup.sh script/schedule-cleanup.sh script/configure.sh script/set-labels.sh script/check-token.sh lib/common.sh lib/runner-layout.sh lib/runner-service.sh lib/runner-release.sh lib/runner-config.sh lib/runner-container.sh lib/runner-build.sh lib/runner-reaper.sh lib/runner-history.sh script/history.sh listener/provision-job.sh listener/reap.sh listener/host-probe.sh images/build-runner-image.sh script/lint-adr.sh script/fetch-bats.sh script/coverage-gate.sh script/lint-changelog.sh script/lint-readme-sync.sh script/lint-doc-citations.sh script/deploy-listener.sh script/teardown-listener.sh lib/listener-deploy.sh'
+SCRIPTS := 'script/install-deps.sh script/init.sh script/add-runner.sh script/remove-runner.sh script/status.sh script/update.sh script/uninstall.sh script/cleanup.sh script/schedule-cleanup.sh script/configure.sh script/set-labels.sh script/check-token.sh lib/common.sh lib/runner-layout.sh lib/runner-service.sh lib/runner-release.sh lib/runner-config.sh lib/runner-container.sh lib/runner-build.sh lib/runner-reaper.sh lib/runner-history.sh script/history.sh listener/provision-job.sh listener/reap.sh listener/host-probe.sh listener/docker-gc.sh lib/docker-gc.sh images/build-runner-image.sh script/lint-adr.sh script/fetch-bats.sh script/coverage-gate.sh script/lint-changelog.sh script/lint-readme-sync.sh script/lint-doc-citations.sh script/deploy-listener.sh script/teardown-listener.sh lib/listener-deploy.sh'
 
 # Self-built runner-image Dockerfiles (#120/#121/#122), hadolint-checked. The
 # test-tools image ships hadolint, so this needs no extra dependency.
@@ -250,6 +250,7 @@ install-listener: build-listener build-admin
     install -m 0755 listener/provision-job.sh "{{DESTDIR}}{{PREFIX}}/listener/provision-job.sh"
     install -m 0755 listener/reap.sh "{{DESTDIR}}{{PREFIX}}/listener/reap.sh"
     install -m 0755 listener/host-probe.sh "{{DESTDIR}}{{PREFIX}}/listener/host-probe.sh"
+    install -m 0755 listener/docker-gc.sh "{{DESTDIR}}{{PREFIX}}/listener/docker-gc.sh"
     install -d "{{DESTDIR}}{{PREFIX}}/lib"
     install -m 0644 lib/*.sh "{{DESTDIR}}{{PREFIX}}/lib/"
     @echo "installed to {{DESTDIR}}{{PREFIX}}"
