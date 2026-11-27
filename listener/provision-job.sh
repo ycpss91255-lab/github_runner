@@ -22,6 +22,7 @@
 #   RUNNER_RUNTIME            container runtime / hardware shim (e.g. nvidia)
 #                             -> one --runtime <value>; empty = engine default
 #   RUNNER_BUILD_TOOL         daemonless image builder (kaniko/buildkit), #119
+#   RUNNER_DOCKER_SOCKET      opt-in host Docker socket path (empty = off), #116
 #
 # Each invocation runs EXACTLY ONE ephemeral job in a throwaway container that
 # is torn down on exit (--rm), then returns the in-container job's exit status

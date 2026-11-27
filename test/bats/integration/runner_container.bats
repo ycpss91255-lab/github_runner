@@ -355,7 +355,8 @@ teardown() { rm -rf "${FAKE_RH}" "${STUB}"; }
   # bind mount the seam can pass. Whatever it mounts must carry the :Z
   # private-relabel suffix so the kernel relabels it instead of MAC being off.
   make_cli docker
-  export RUNNER_DOCKER_SOCKET=/var/run/docker.sock
+  export RUNNER_DOCKER_SOCKET="${BATS_TEST_TMPDIR}/docker.sock"
+  touch "${RUNNER_DOCKER_SOCKET}"
   run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
   [ "${status}" -eq 0 ]
   mounts=$(grep -A1 -xF -- '-v' "${CAP}" | grep -vxF -- '-v' | grep -vxF -- '--')
@@ -378,12 +379,13 @@ teardown() { rm -rf "${FAKE_RH}" "${STUB}"; }
 
 @test "runner_container_run mounts the docker socket only when explicitly opted in (#116)" {
   make_cli docker
-  export RUNNER_DOCKER_SOCKET=/var/run/docker.sock
+  export RUNNER_DOCKER_SOCKET="${BATS_TEST_TMPDIR}/docker.sock"
+  touch "${RUNNER_DOCKER_SOCKET}"
   run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
   [ "${status}" -eq 0 ]
   # Opt-in path: the configured socket is bind-mounted (relabelled :Z) so a
   # runner type that genuinely needs the daemon can ask for it explicitly.
-  grep -qF -- '/var/run/docker.sock:/var/run/docker.sock' "${CAP}"
+  grep -qF -- "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}" "${CAP}"
 }
 
 # --- #117 precise --device passthrough driven by the per-type config ---

@@ -202,12 +202,19 @@ runner_container_run() {
   # token survives as its own argv word.
   local -a hardening_args=()
   while IFS= read -r line; do hardening_args+=("${line}"); done < <(runner_container_hardening_args)
-  # Docker-socket opt-in (#116): NEVER mounted by default. Only a runner type
-  # that explicitly set RUNNER_DOCKER_SOCKET gets it, relabelled :Z so MAC stays
-  # enforced. The empty default leaves the array empty -> no socket reaches a job.
+  # The listener sets RUNNER_DOCKER_SOCKET from the per-type docker_socket
+  # opt-in (#116). Empty leaves the mount off. Access is root-equivalent on
+  # the host. The mount keeps :Z relabelling, and --group-add lets the runner
+  # user open the socket even if its image-local docker group has a different GID.
+  # Resolve the target's GID because the bind mount follows symlinks.
   local -a socket_args=()
+  local socket_gid
   if [[ -n "${RUNNER_DOCKER_SOCKET}" ]]; then
-    socket_args=(-v "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}:Z")
+    if ! socket_gid=$(stat -L -c %g "${RUNNER_DOCKER_SOCKET}" 2>/dev/null) || [[ ! ${socket_gid} =~ ^[0-9]+$ ]]; then
+      printf 'FAIL: cannot resolve group ID for Docker socket %s\n' "${RUNNER_DOCKER_SOCKET}" >&2
+      return 1
+    fi
+    socket_args=(-v "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}:Z" --group-add "${socket_gid}")
   fi
   # Precise --device passthrough (#117): one --device per declared host node, no
   # --privileged. Word-splitting RUNNER_DEVICES on whitespace is intentional so a

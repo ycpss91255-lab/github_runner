@@ -161,7 +161,7 @@ runner-type config (the shell-out contract, ADR-0003):
 | `RUNNER_CAP_ADD` | space-separated capabilities to add back on top of `--cap-drop=ALL` (default none) (#114) |
 | `RUNNER_DEVICES` | space/newline-separated host device nodes passed through precisely as `--device` -- never `--privileged` (#117) |
 | `RUNNER_CONTAINER_HOME` | the runner's home inside the image, used as the container's working directory (default `/home/runner`); set it only for an image that installs the runner elsewhere |
-| `RUNNER_DOCKER_SOCKET` | **opt-in only**: host docker socket to bind-mount; **empty by default so NO socket reaches a job** (#116) |
+| `RUNNER_DOCKER_SOCKET` | Host Docker socket path from the runner type's `docker_socket` setting. Explicitly empty when the type leaves access off (#116). |
 
 Fixed (not knobs): `--cap-drop=ALL` and `--security-opt no-new-privileges` are
 always applied; the **default seccomp profile is kept** (never
@@ -177,11 +177,33 @@ writable layer and are removed with it by `--rm`. The per-job host dir under the
 work root is only bookkeeping: it anchors the credential env-file, which sits
 beside it rather than inside it (#140), and it is what the reaper sweeps.
 
-**Docker socket is never mounted by default (#116).** Job code therefore cannot
-reach the host daemon; image builds use the daemonless build seam (#118) instead.
-A runner type that genuinely needs the daemon opts in *explicitly* by setting
-`RUNNER_DOCKER_SOCKET` to the host socket path -- this is the only path that
-mounts it, and it should be a conscious operator decision.
+### Host Docker socket opt-in (#116)
+
+Set `docker_socket: /var/run/docker.sock` on a runner type to bind-mount that
+host socket at the same path in its job containers. The path must be absolute
+and clean, with no colons, whitespace, or control characters. Access defaults
+to off. The listener passes the configured path as `RUNNER_DOCKER_SOCKET` for
+that type and explicitly passes an empty value for every other type, overriding
+any inherited value. The provisioner adds `--group-add <host socket gid>` so
+the image's runner user can open the socket even if its image-local Docker
+group has a different GID. The `:Z` relabel and all other container hardening
+stay in place.
+
+**Host Docker socket access is ROOT-EQUIVALENT on the host.** Any job on the
+opted-in type can ask the daemon to start a privileged container or mount the
+host filesystem. Enable access only on a type whose jobs you trust. Fork PRs
+are expected to be gated by the organization's approval policy
+(`approval_policy=all_external_contributors`).
+
+Containers started by a job are siblings on the host daemon. The daemon resolves
+`docker run -v <path>:...` and Compose bind mounts on the host filesystem.
+The job's checkout under `_work` exists only inside the job container because
+the job has no host directory mounted. Avoid both relative and absolute bind
+mounts of that workspace. Use `docker build` with a workspace context, which
+the CLI streams to the daemon, or stream a build context on stdin and use
+`COPY` in the Dockerfile. Use named volumes for shared data and `docker cp`
+to copy files into or out of containers, including a container that mounts a
+named volume you want to populate.
 
 ### Daemonless image builds (#118/#119)
 

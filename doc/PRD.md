@@ -136,7 +136,7 @@ is equivalent to no isolation at all.
 
 | Switch | Default | Location | How it is loosened |
 | --- | --- | --- | --- |
-| Host docker socket | **Empty; no job container gets the socket** | `: "${RUNNER_DOCKER_SOCKET:=}"` in `lib/runner-container.sh`; the `socket_args` branch in `runner_container_run` | The operator explicitly sets that environment variable to a socket path; the mount still keeps `:Z` relabelling and does not turn MAC off |
+| Host docker socket | **Empty; no job container gets the socket** | `: "${RUNNER_DOCKER_SOCKET:=}"` in `lib/runner-container.sh`; the `socket_args` branch in `runner_container_run` | The listener sets the variable from the per-runner-type `docker_socket:` config field and explicitly clears it for types with access off. The provisioner keeps `:Z` relabelling and adds `--group-add <host socket gid>` |
 | Device passthrough | **Empty; no `--device` is passed** | `: "${RUNNER_DEVICES:=}"` in `lib/runner-container.sh`; expanded item by item by the `device_args` loop in `runner_container_run` | Name the device nodes explicitly in the runner type config |
 | Extra capabilities | **Empty** | `: "${RUNNER_CAP_ADD:=}"` in `lib/runner-container.sh` | Add a single capability by name |
 | Baseline hardening | `--cap-drop=ALL`, `--security-opt no-new-privileges` and `--pids-limit` (default 4096) always applied | `runner_container_hardening_args` in `lib/runner-container.sh`, with the `RUNNER_PIDS_LIMIT` default above it | There is no "turn hardening off" flag |

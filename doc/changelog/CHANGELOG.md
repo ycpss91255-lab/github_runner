@@ -15,6 +15,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   when passed a Compose file. The CPU sample keeps the stock digest until the
   first publish.
 
+- **Runner types can opt into the host Docker socket.** Set `docker_socket`
+  on a trusted type to let its jobs use the host Docker daemon for builds,
+  runs, and Compose. This grants root-equivalent host access. The provisioner
+  adds the socket target's host GID even for symlinked paths and retains baseline
+  container hardening. Socket access defaults to off for every type.
 - **Deploy several runner types on one host.** `script/deploy-listener.sh`
   installs a shared systemd template and starts one instance per runner type.
   Each instance has its own 0600 environment file and writable runner state
