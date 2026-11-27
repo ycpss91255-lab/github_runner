@@ -52,6 +52,7 @@ YAML
     chmod +x "${STUB}/${name}"
   }
 
+  _mkstub hostname 'printf "%s\n" "${STUB_HOSTNAME-host-a}"'
   _mkstub id 'if [ "$1" = -nG ]; then echo "ci-runner ${STUB_USER_GROUPS:-}"; exit 0; fi
 if [ "${STUB_USER_EXISTS}" = 1 ]; then echo 999; exit 0; fi; exit 1'
   _mkstub useradd 'exit 0'
@@ -273,9 +274,17 @@ EOF
   [ "$(stat -c '%a' "${file}")" = 600 ]
   [ "$(grep '^GITHUB_TOKEN=' "${file}")" = 'GITHUB_TOKEN=already' ]
   [ "$(grep '^REAP_SCRIPT=' "${file}")" = 'REAP_SCRIPT=/custom/reap.sh' ]
-  grep -qxF 'SCALE_SET_OWNER=acme' "${file}"
+  local derived_owner
+  derived_owner=$(grep '^SCALE_SET_OWNER=' "${file}")
   grep -qxF "PROVISION_SCRIPT=${PREFIX}/listener/provision-job.sh" "${file}"
   grep -qxF "HOST_PROBE_CMD=${PREFIX}/listener/host-probe.sh" "${file}"
+
+  sed -i 's/^SCALE_SET_OWNER=.*/SCALE_SET_OWNER=explicit-owner/' "${file}"
+  export STUB_HOSTNAME=host-b
+  run _deploy
+  [ "${status}" -eq 0 ]
+  [ "$(grep '^SCALE_SET_OWNER=' "${file}")" = 'SCALE_SET_OWNER=explicit-owner' ]
+  [ "${derived_owner}" = 'SCALE_SET_OWNER=host-a' ]
 }
 
 @test "a second run skips enabling a unit that is already enabled" {

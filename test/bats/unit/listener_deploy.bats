@@ -24,6 +24,13 @@ setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   LIB="${ROOT}/lib/listener-deploy.sh"
   WORK=$(mktemp -d)
+  mkdir -p "${WORK}/stub"
+  cat > "${WORK}/stub/hostname" <<'EOF'
+#!/bin/bash
+printf '%s\n' "${STUB_HOSTNAME-host-a}"
+EOF
+  chmod +x "${WORK}/stub/hostname"
+  export PATH="${WORK}/stub:${PATH}"
 }
 
 teardown() { rm -rf "${WORK}"; }
@@ -233,7 +240,7 @@ teardown() { rm -rf "${WORK}"; }
   grep -qx 'RUNNER_TYPE=gpu' "${WORK}/etc/listener.env"
 }
 
-@test "listener_write_env_file sets the target owner and installed script paths" {
+@test "listener_write_env_file sets the hostname owner and installed script paths" {
   local file="${WORK}/etc/listener.env" prefix="${WORK}/opt"
   run bash -c '
     source "$1"
@@ -243,7 +250,7 @@ teardown() { rm -rf "${WORK}"; }
   ' _ "${LIB}" "${file}" "${prefix}"
   [ "${status}" -eq 0 ]
   [ "$(stat -c '%a' "${file}")" = 600 ]
-  grep -qxF 'SCALE_SET_OWNER=acme' "${file}"
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
   grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
   grep -qxF "REAP_SCRIPT=${prefix}/listener/reap.sh" "${file}"
   grep -qxF "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh" "${file}"
@@ -869,12 +876,12 @@ teardown() { rm -rf "${WORK}"; }
   [ "${status}" -eq 0 ]
   grep -qxF 'REAP_SCRIPT=/custom/reap.sh' "${file}"
   grep -qxF 'GITHUB_CONFIG_URL=https://github.com/my-org' "${file}"
-  grep -qxF 'SCALE_SET_OWNER=my-org' "${file}"
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
   grep -qxF 'RUNNER_TYPE=gpu' "${file}"
   grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
 }
 
-@test "listener_backfill_env_file rejects a config URL without an owner" {
+@test "listener_backfill_env_file uses the hostname with an ownerless config URL" {
   local file="${WORK}/listener.env"
   install -m 0600 /dev/null "${file}"
   printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com' > "${file}"
@@ -884,12 +891,11 @@ teardown() { rm -rf "${WORK}"; }
     source "$1"
     listener_backfill_env_file "$2" https://github.com /c.yaml gpu
   ' _ "${LIB}" "${file}"
-  [ "${status}" -ne 0 ]
-  [[ "${output}" == *SCALE_SET_OWNER* ]]
-  ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
 }
 
-@test "listener_write_env_file rejects a config URL without an owner" {
+@test "listener_write_env_file uses the hostname with an ownerless config URL" {
   local file="${WORK}/listener.env"
 
   run bash -c '
@@ -897,6 +903,36 @@ teardown() { rm -rf "${WORK}"; }
     source "$1"
     LISTENER_TOKEN=fixture-token
     listener_write_env_file "$2" https://github.com /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
+}
+
+@test "listener_backfill_env_file rejects an empty hostname" {
+  local file="${WORK}/listener.env"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/acme' > "${file}"
+
+  export STUB_HOSTNAME=''
+  run bash -c '
+    set -e
+    source "$1"
+    listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *SCALE_SET_OWNER* ]]
+  ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+}
+
+@test "listener_write_env_file rejects an empty hostname" {
+  local file="${WORK}/listener.env"
+
+  export STUB_HOSTNAME=''
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    listener_write_env_file "$2" https://github.com/acme /c.yaml gpu
   ' _ "${LIB}" "${file}"
   [ "${status}" -ne 0 ]
   [[ "${output}" == *SCALE_SET_OWNER* ]]
