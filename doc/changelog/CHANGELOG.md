@@ -131,6 +131,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The orphan sweep now removes stale JIT credential env files.** A job
+  killed when the listener restarted left its mode-0600
+  `jit-<id>.<rand>.jitconfig.env` file in the runner work folder, because the
+  sweep removed only `jit-*` directories. The sweep now also deletes these
+  files for jobs that are not running, and `listener/provision-job.sh`
+  removes its own env file when it is terminated mid-job.
+
 - **Pin the sample CPU image and runner release fallback to 2.338.2.**
   The previously pinned 2.335 runner could log "Listening for Jobs" while
   jobs stayed queued because GitHub stopped dispatching to the stale runner
