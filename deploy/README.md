@@ -237,7 +237,7 @@ It runs on every push to `main` that changes `images/**`, and on demand:
 
 ```sh
 # Publish now; runner_version is optional (empty = the resolved latest release).
-gh workflow run runner-images.yaml --ref main -f runner_version=2.334.0
+gh workflow run runner-images.yaml --ref main -f runner_version=2.338.2
 gh run watch "$(gh run list --workflow runner-images.yaml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
@@ -267,8 +267,8 @@ then hands the already-verified tarball to a digest-pinned, hermetic build:
 ```sh
 # Build the SEC-5 base (gh is a prereq: the digest is verified strict).
 # RUNNER_VERSION pins the version; omit for the resolved latest.
-RUNNER_VERSION=2.334.0 \
-  images/build-runner-image.sh --tag ghcr.io/your-org/runner-base:2.334.0
+RUNNER_VERSION=2.338.2 \
+  images/build-runner-image.sh --tag ghcr.io/your-org/runner-base:2.338.2
 ```
 
 **GPU/device image, layered on the SEC-5 base (#121).** The CUDA/device stack
@@ -278,13 +278,13 @@ from a pinned `nvidia/cuda` image, no NVIDIA apt repo at build time):
 
 ```sh
 docker build -f images/runner-gpu.Dockerfile \
-  --build-arg RUNNER_BASE_IMAGE=ghcr.io/your-org/runner-base:2.334.0 \
-  --build-arg RUNNER_VERSION=2.334.0 \
-  -t ghcr.io/your-org/gpu-runner:2.334.0 .
+  --build-arg RUNNER_BASE_IMAGE=ghcr.io/your-org/runner-base:2.338.2 \
+  --build-arg RUNNER_VERSION=2.338.2 \
+  -t ghcr.io/your-org/gpu-runner:2.338.2 .
 
 # Push, then pin the runner-type config's `image:` by the resulting DIGEST:
-docker push ghcr.io/your-org/gpu-runner:2.334.0
-docker buildx imagetools inspect ghcr.io/your-org/gpu-runner:2.334.0   # copy Digest
+docker push ghcr.io/your-org/gpu-runner:2.338.2
+docker buildx imagetools inspect ghcr.io/your-org/gpu-runner:2.338.2   # copy Digest
 # -> image: ghcr.io/your-org/gpu-runner@sha256:<digest>
 ```
 
@@ -294,13 +294,13 @@ docker buildx imagetools inspect ghcr.io/your-org/gpu-runner:2.334.0   # copy Di
 
 **Plain CPU type — pin the upstream image by digest (#122).** A CPU type needs
 no self-built image; it uses the **official** `ghcr.io/actions/actions-runner`
-image pinned by `@sha256:` digest (never `:latest`). Bump the digest
-deliberately:
+image pinned by `@sha256:` digest. When updating the CPU sample, bump the
+digest, its `# actions-runner X.Y.Z` comment, and `RUNNER_VERSION_FALLBACK` in
+`lib/runner-release.sh` together. Inspect the version you validated and copy
+the top-level digest into the CPU type's `image:` field.
 
 ```sh
-docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
-# copy the top-level "Digest: sha256:..." into the cpu type's image:, then commit.
-# (Pin the version you validated, not whatever :latest moved to.)
+docker buildx imagetools inspect ghcr.io/actions/actions-runner:2.338.2
 ```
 
 ## 3c. Create the runner type's scale set on GitHub (`scaleset-admin`)
@@ -381,6 +381,31 @@ journalctl -u scaleset-listener -f
 clean drain (SIGTERM cancels the context, in-flight jobs drain within
 `TimeoutStopSec`) or a transient error, so the host is never left without a
 listener.
+
+## Troubleshooting
+
+### Runner shows Listening for Jobs but jobs stay queued
+
+The ephemeral JIT runners run with self-update disabled. Under the 30-day
+rule in effect for this incident, GitHub refused to dispatch jobs to these
+runners once a newer runner release had been available for more than 30 days.
+The container could log "Listening for Jobs" while the job stayed queued
+without an error. GitHub now documents the version-specific
+`runtime_deprecates_at` field for checking when dispatch stops.
+[GitHub runner software update policy](https://docs.github.com/en/actions/reference/runners/self-hosted-runners#runner-software-updates-on-self-hosted-runners)
+
+1. Run `docker inspect <runner-container>` on the listener host and check
+   `Config.Image`. For a digest pin, look up the runner version in the
+   corresponding image tag or the comment accompanying the pin. Compare it
+   with the latest version on [the runner releases page](https://github.com/actions/runner/releases).
+2. For CPU runners, run
+   `docker buildx imagetools inspect ghcr.io/actions/actions-runner:<version>`
+   for the new version and copy the top-level digest. For a self-built GPU
+   image, rebuild and push it with the new `RUNNER_VERSION` following
+   [section 3b](#3b-build-or-pin-the-per-type-runner-images-92-120121122),
+   then use the published GPU image digest.
+3. Update the affected `image:` pin in the host's `runner-types.yaml` and
+   run `sudo systemctl restart scaleset-listener.service`.
 
 ## Verifying the unit file
 
