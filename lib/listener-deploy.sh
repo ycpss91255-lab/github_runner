@@ -42,6 +42,12 @@ _systemctl()      { command systemctl "$@"; }
 _journalctl()     { command journalctl "$@"; }
 _id()             { command id "$@"; }
 _useradd()        { command useradd "$@"; }
+_usermod()        { command usermod "$@"; }
+_getent()         { command getent "$@"; }
+_chown()          { command chown "$@"; }
+# Whether a command is on PATH -- the same lookup the provisioner's
+# runner_container_cli makes when it picks the engine.
+_have()           { command -v "$1" >/dev/null 2>&1; }
 _just()           { command just "$@"; }
 # Refuses to run a binary that is not there, rather than letting the shell's
 # own "command not found" be the only trace. The caller gets a status it can
@@ -73,6 +79,13 @@ listener_deploy_paths() {
   LISTENER_UNIT_PATH="${LISTENER_UNIT_DIR}/${LISTENER_UNIT_NAME}"
   LISTENER_BIN="${LISTENER_PREFIX}/bin/scaleset-listener"
   LISTENER_ADMIN_BIN="${LISTENER_PREFIX}/bin/scaleset-admin"
+  # The runner state the listener WRITES at job time. provision-job.sh resolves
+  # RUNNER_HOME to <its dir>/../runners -- <prefix>/runners once installed --
+  # and creates each per-job dir under RUNNER_HOME/work (runner_work_root) and
+  # the history ledger under RUNNER_HOME/history. The unit's ReadWritePaths
+  # grants exactly LISTENER_RUNNER_HOME, so these two must name the same path.
+  LISTENER_RUNNER_HOME="${LISTENER_PREFIX}/runners"
+  LISTENER_WORK_ROOT="${LISTENER_RUNNER_HOME}/work"
 }
 
 # --- the admin tool ---------------------------------------------------------
@@ -222,6 +235,69 @@ listener_ensure_service_user() {
   fi
   _useradd --system --create-home --shell /usr/sbin/nologin "${user}"
   echo "  service user:     created ${user}"
+}
+
+# --- engine access -----------------------------------------------------------
+
+# True when the user is already a member of the group (primary or
+# supplementary), so a re-run does not usermod again.
+listener_user_in_group() {
+  local user=$1 group=$2 g
+  for g in $(_id -nG "${user}" 2>/dev/null); do
+    [[ ${g} == "${group}" ]] && return 0
+  done
+  return 1
+}
+
+# Let the service user reach the container engine the provisioner will use.
+#
+# The listener runs as the service user and starts every job through the engine.
+# Rootful docker exposes the daemon only on a socket owned by root:docker, so
+# without the docker group the listener cannot run a single job -- and leaving
+# that to a manual `usermod` contradicted the one-command deploy. The engine is
+# picked the way runner_container_cli picks it: podman first (rootless, needs
+# no group -- granting docker there would add root-equivalence for nothing),
+# else docker. A docker group that does not exist is not invented: without it
+# there is no rootful socket to grant (rootless docker, or no daemon yet).
+# Never fatal: a missing engine is reported, and the job-time FAIL names it too.
+listener_ensure_engine_access() {
+  local user=$1
+  if _have podman; then
+    echo "  engine access:    podman (rootless); no docker group needed, skipped"
+    return 0
+  fi
+  if ! _have docker; then
+    echo "  engine access:    WARN no podman or docker on PATH; jobs cannot start until one is installed" >&2
+    return 0
+  fi
+  if ! _getent group docker >/dev/null 2>&1; then
+    echo "  engine access:    docker found but no docker group (not rootful docker?); ${user} needs its own engine socket, skipped"
+    return 0
+  fi
+  if listener_user_in_group "${user}" docker; then
+    echo "  engine access:    ${user} already in the docker group, skipped"
+    return 0
+  fi
+  _usermod -aG docker "${user}"
+  echo "  engine access:    added ${user} to the docker group (rootful docker)"
+}
+
+# --- the runner state tree ---------------------------------------------------
+
+# Create RUNNER_HOME and its work root, owned by the service user.
+#
+# The unit runs under ProtectSystem=strict, so the listener can write only what
+# ReadWritePaths grants (LISTENER_RUNNER_HOME). Granting a path is not enough on
+# its own: the directory must exist (systemd refuses to start a unit whose
+# ReadWritePaths is missing, which is the loud failure we want rather than a
+# silent read-only tree) and belong to the user the listener runs as. Only these
+# two directories are ensured, never recursively, so a re-run leaves whatever
+# the listener already wrote under them alone.
+listener_ensure_work_root() {
+  local user=$1
+  install -d -m 0750 "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
+  _chown "${user}:${user}" "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
+  echo "  work root:        ${LISTENER_WORK_ROOT} (owned by ${user})"
 }
 
 # --- the environment file (the secret) --------------------------------------

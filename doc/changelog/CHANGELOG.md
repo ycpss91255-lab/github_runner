@@ -293,6 +293,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs the release build recipe (not just `go build ./...`), so a recipe
   regression is caught before an operator hits it at deploy time.
 
+- **A deployed listener can now reach the engine and write its work root.**
+  `script/deploy-listener.sh` created the `ci-runner` service user and stopped
+  there, so on a rootful docker host the listener could not open the daemon
+  socket, and `deploy/README.md` told the operator to `usermod` by hand. The
+  deploy now adds the user to the `docker` group when the engine is rootful
+  docker (no `podman` on `PATH`, a `docker` group present), and skips a user
+  that is already a member. Separately, `deploy/scaleset-listener.service` ran
+  under `ProtectSystem=strict` with its `ReadWritePaths` commented out, so
+  `RUNNER_HOME` (`/opt/github-runner-listener/runners`, which holds the per-job
+  work root and the history ledger) was read-only. The unit now grants that
+  path, and the deploy creates it owned by the service user.
+
 ### Added
 
 - **The operator commands are on `just` now, not only on script paths.**

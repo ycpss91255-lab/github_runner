@@ -52,8 +52,17 @@ YAML
     chmod +x "${STUB}/${name}"
   }
 
-  _mkstub id 'if [ "${STUB_USER_EXISTS}" = 1 ]; then echo 999; exit 0; fi; exit 1'
+  _mkstub id 'if [ "$1" = -nG ]; then echo "ci-runner ${STUB_USER_GROUPS:-}"; exit 0; fi
+if [ "${STUB_USER_EXISTS}" = 1 ]; then echo 999; exit 0; fi; exit 1'
   _mkstub useradd 'exit 0'
+  # The host engine is rootful docker: a docker CLI on PATH and a docker group
+  # that owns its socket. usermod / chown only record, so nothing on the test
+  # host changes.
+  export STUB_USER_GROUPS="${STUB_USER_GROUPS:-}"
+  _mkstub docker 'exit 0'
+  _mkstub getent '[ "$1 $2" = "group docker" ] && { echo "docker:x:998:"; exit 0; }; exit 2'
+  _mkstub usermod 'exit 0'
+  _mkstub chown 'exit 0'
   # A started unit becomes active, the way a real one does -- otherwise the
   # verification step could never pass and the test would be asserting against
   # a systemd that behaves like nothing else.
@@ -399,4 +408,56 @@ EOF
   run _deploy_env_free
   [ "${status}" -eq 0 ]
   grep -qx 'GITHUB_TOKEN=tok-abc123' "${ETC}/scaleset-listener.env"
+}
+
+# --- engine access and the writable runner state ---------------------------
+
+@test "a full run adds the service user to the docker group on a rootful docker host" {
+  run _deploy
+  [ "${status}" -eq 0 ]
+  grep -qxF 'name=usermod' "${CAP}"
+  grep -A3 -xF 'name=usermod' "${CAP}" | grep -qxF -- '-aG'
+  grep -A3 -xF 'name=usermod' "${CAP}" | grep -qxF 'docker'
+  grep -A3 -xF 'name=usermod' "${CAP}" | grep -qxF 'ci-runner'
+}
+
+@test "a second run skips a service user that is already in the docker group" {
+  export STUB_USER_EXISTS=1 STUB_USER_GROUPS=docker
+  run _deploy
+  [ "${status}" -eq 0 ]
+  ! grep -qxF 'name=usermod' "${CAP}" || false
+  [[ "${output}" == *"already in the docker group"* ]]
+}
+
+@test "a full run creates the work root under the prefix and hands it to the service user" {
+  run _deploy
+  [ "${status}" -eq 0 ]
+  [ -d "${PREFIX}/runners/work" ]
+  grep -A3 -xF 'name=chown' "${CAP}" | grep -qxF 'ci-runner:ci-runner'
+  grep -A3 -xF 'name=chown' "${CAP}" | grep -qxF "${PREFIX}/runners/work"
+}
+
+@test "a dry run neither changes groups nor creates the work root" {
+  run bash -c "'${SCRIPT}' --dry-run --config '${CONFIG}' --type gpu \
+    --org-url https://github.com/acme --prefix '${PREFIX}' --etc '${ETC}'" </dev/null
+  [ "${status}" -eq 0 ]
+  ! grep -qxF 'name=usermod' "${CAP}" || false
+  ! grep -qxF 'name=chown' "${CAP}" || false
+  [ ! -d "${PREFIX}/runners" ]
+}
+
+@test "the shipped unit grants write access to exactly the runner home the deploy creates" {
+  # ProtectSystem=strict makes /opt read-only for the listener. provision-job.sh
+  # creates each per-job dir under RUNNER_HOME/work and writes the history
+  # ledger under RUNNER_HOME/history, with RUNNER_HOME = <prefix>/runners. The
+  # unit must grant that tree, the deploy must create it, and the two must name
+  # the same path for the default prefix the unit's ExecStart is written for.
+  unit="${ROOT}/deploy/scaleset-listener.service"
+  grep -qx 'ProtectSystem=strict' "${unit}"
+  rw=$(sed -n 's/^ReadWritePaths=//p' "${unit}")
+  [ -n "${rw}" ]
+  expected=$(bash -c "source '${ROOT}/lib/listener-deploy.sh'; unset LISTENER_PREFIX; listener_deploy_paths; echo \"\${LISTENER_RUNNER_HOME}\"")
+  [ "${rw}" = "${expected}" ]
+  # The unit runs from the same prefix.
+  grep -qx "ExecStart=${expected%/runners}/bin/scaleset-listener" "${unit}"
 }

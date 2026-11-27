@@ -100,6 +100,121 @@ teardown() { rm -rf "${WORK}"; }
   [[ "${output}" == *"nologin"* ]]
 }
 
+# --- engine access (the docker group) --------------------------------------
+# The listener runs as the service user and provisions every job through the
+# container engine. With rootful docker that means the daemon socket, which only
+# root and the `docker` group can open -- so a deploy that creates the user and
+# stops there leaves a listener that cannot run a single job.
+
+@test "listener_ensure_engine_access adds the user to the docker group on rootful docker" {
+  run bash -c "
+    source '${LIB}'
+    _have() { [ \"\$1\" = docker ]; }
+    _getent() { [ \"\$*\" = 'group docker' ] && echo 'docker:x:998:'; }
+    _id() { [ \"\$1\" = -nG ] && echo 'ci-runner'; }
+    _usermod() { echo \"USERMOD \$*\"; }
+    listener_ensure_engine_access ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"USERMOD -aG docker ci-runner"* ]]
+  [[ "${output}" == *"added ci-runner to the docker group"* ]]
+}
+
+@test "listener_ensure_engine_access skips a user already in the docker group (idempotent)" {
+  run bash -c "
+    source '${LIB}'
+    _have() { [ \"\$1\" = docker ]; }
+    _getent() { echo 'docker:x:998:ci-runner'; }
+    _id() { [ \"\$1\" = -nG ] && echo 'ci-runner docker'; }
+    _usermod() { echo 'USERMOD-RAN'; }
+    listener_ensure_engine_access ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"USERMOD-RAN"* ]]
+  [[ "${output}" == *"already in the docker group"* ]]
+}
+
+@test "listener_ensure_engine_access leaves the groups alone when podman is the engine" {
+  # The provisioner prefers podman (runner_container_cli), which is rootless:
+  # the docker group would grant root-equivalence for nothing.
+  run bash -c "
+    source '${LIB}'
+    _have() { return 0; }
+    _getent() { echo 'docker:x:998:'; }
+    _id() { echo 'ci-runner'; }
+    _usermod() { echo 'USERMOD-RAN'; }
+    listener_ensure_engine_access ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"USERMOD-RAN"* ]]
+  [[ "${output}" == *"podman"* ]]
+}
+
+@test "listener_ensure_engine_access does not invent a docker group that does not exist" {
+  # No docker group means no rootful daemon socket to grant: rootless docker, or
+  # no engine yet. Creating the group would grant nothing and hide the gap.
+  run bash -c "
+    source '${LIB}'
+    _have() { [ \"\$1\" = docker ]; }
+    _getent() { return 2; }
+    _id() { echo 'ci-runner'; }
+    _usermod() { echo 'USERMOD-RAN'; }
+    listener_ensure_engine_access ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"USERMOD-RAN"* ]]
+  [[ "${output}" == *"no docker group"* ]]
+}
+
+@test "listener_ensure_engine_access warns when there is no engine at all" {
+  run bash -c "
+    source '${LIB}'
+    _have() { return 1; }
+    _usermod() { echo 'USERMOD-RAN'; }
+    listener_ensure_engine_access ci-runner 2>&1
+  "
+  [ "${status}" -eq 0 ]
+  [[ "${output}" != *"USERMOD-RAN"* ]]
+  [[ "${output}" == *"no podman or docker"* ]]
+}
+
+# --- the runner state tree (work root + history) ----------------------------
+
+@test "listener_deploy_paths derives the runner home and work root from the prefix" {
+  run bash -c "
+    source '${LIB}'
+    LISTENER_PREFIX=/opt/x; LISTENER_ETC=/etc/x; listener_deploy_paths
+    echo \"\${LISTENER_RUNNER_HOME} \${LISTENER_WORK_ROOT}\"
+  "
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "/opt/x/runners /opt/x/runners/work" ]
+}
+
+@test "listener_ensure_work_root creates the runner home and work root owned by the user" {
+  run bash -c "
+    source '${LIB}'
+    LISTENER_PREFIX='${WORK}/opt'; LISTENER_ETC='${WORK}/etc'; listener_deploy_paths
+    _chown() { echo \"CHOWN \$*\"; }
+    listener_ensure_work_root ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  [ -d "${WORK}/opt/runners/work" ]
+  [[ "${output}" == *"CHOWN ci-runner:ci-runner ${WORK}/opt/runners ${WORK}/opt/runners/work"* ]]
+}
+
+@test "listener_ensure_work_root is safe to re-run on an existing tree (idempotent)" {
+  mkdir -p "${WORK}/opt/runners/work/jit-leftover"
+  run bash -c "
+    source '${LIB}'
+    LISTENER_PREFIX='${WORK}/opt'; LISTENER_ETC='${WORK}/etc'; listener_deploy_paths
+    _chown() { :; }
+    listener_ensure_work_root ci-runner
+  "
+  [ "${status}" -eq 0 ]
+  # Existing contents are left alone: only the two directories are ensured.
+  [ -d "${WORK}/opt/runners/work/jit-leftover" ]
+}
+
 # --- the environment file (the secret) -------------------------------------
 
 @test "listener_write_env_file writes a 0600 file containing the token" {

@@ -237,7 +237,8 @@ main() {
   echo "    admin tool:       ${SCALESET_ADMIN_BIN} (the config was read through it)"
   echo "    image:            ${image}"
   echo "    install prefix:   ${LISTENER_PREFIX}"
-  echo "    service user:     ${SERVICE_USER}"
+  echo "    service user:     ${SERVICE_USER} (added to the docker group on rootful docker)"
+  echo "    work root:        ${LISTENER_WORK_ROOT} (owned by ${SERVICE_USER})"
   echo "    environment file: ${LISTENER_ENV_FILE} (0600, holds the token)"
   echo "    systemd unit:     ${LISTENER_UNIT_PATH} (enable + start)"
   echo
@@ -318,6 +319,8 @@ main() {
   echo "  build+install:    ${LISTENER_PREFIX}"
 
   listener_ensure_service_user "${SERVICE_USER}"
+  listener_ensure_engine_access "${SERVICE_USER}"
+  listener_ensure_work_root "${SERVICE_USER}"
 
   if listener_env_file_ready "${LISTENER_ENV_FILE}"; then
     echo "  environment file: ${LISTENER_ENV_FILE} already in place (0600), skipped"
