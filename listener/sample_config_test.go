@@ -94,3 +94,23 @@ func TestGPUTypeAutoConcurrencyFromGPUCount(t *testing.T) {
 		t.Errorf("GPU pool bound = %d, want 2 (one slot per detected GPU)", l.bound)
 	}
 }
+
+// GitHub stops dispatching jobs to runners with auto-update disabled once a
+// newer runner release has been out for more than 30 days. A stale CPU image
+// can still log "Listening for Jobs" while every job stays queued.
+func TestCPUTypeImagePinnedToCurrentRunner(t *testing.T) {
+	types, err := LoadConfig(sampleConfigPath(t))
+	if err != nil {
+		t.Fatalf("load sample: %v", err)
+	}
+	const wantImage = "ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
+	for _, rt := range types {
+		if rt.Name == "cpu" {
+			if rt.Image != wantImage {
+				t.Errorf("cpu image = %q, want %q", rt.Image, wantImage)
+			}
+			return
+		}
+	}
+	t.Fatal("sample config is missing the plain CPU runner type")
+}
