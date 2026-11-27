@@ -8,6 +8,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Publish a CPU runner image with Docker Compose.**
+  `images/runner-cpu.Dockerfile` builds `ghcr.io/ycpss91255-lab/runner-cpu`
+  with Docker Compose v5.7.1 and Buildx v0.39.0, both verified by SHA-256.
+  On the stock image, `docker compose` failed with "unknown shorthand flag 'f'"
+  when passed a Compose file. The CPU sample keeps the stock digest until the
+  first publish.
+
 - **Deploy several runner types on one host.** `script/deploy-listener.sh`
   installs a shared systemd template and starts one instance per runner type.
   Each instance has its own 0600 environment file and writable runner state

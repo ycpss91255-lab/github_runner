@@ -4,6 +4,11 @@ name: runner images
 # publishes them to ghcr.io, so no host pushes them by hand:
 #   ghcr.io/ycpss91255-lab/runner-base:<runner-version>  -- SEC-5 base (#120)
 #   ghcr.io/ycpss91255-lab/gpu-runner:<runner-version>   -- CUDA on that base (#121)
+#   ghcr.io/ycpss91255-lab/runner-cpu:<runner-version>   -- upstream runner plus pinned Compose and Buildx
+#
+# The CPU runner version is fixed by the FROM digest in
+# images/runner-cpu.Dockerfile. Its tag comes from the built runner binary,
+# independently of runner_version and resolve_runner_version.
 #
 # It builds through the repo's own entry points, never a parallel copy of them:
 # images/build-runner-image.sh obtains the runner tarball and verifies it STRICT
@@ -23,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       runner_version:
-        description: 'actions/runner version to bake in (e.g. 2.338.2). Empty = what resolve_runner_version resolves (the latest release).'
+        description: 'actions/runner version for base and GPU (e.g. 2.338.2). Empty = what resolve_runner_version resolves (the latest release).'
         required: false
         default: ''
   push:
@@ -50,6 +55,7 @@ concurrency:
 env:
   BASE_IMAGE_NAME: ghcr.io/ycpss91255-lab/runner-base
   GPU_IMAGE_NAME: ghcr.io/ycpss91255-lab/gpu-runner
+  CPU_IMAGE_NAME: ghcr.io/ycpss91255-lab/runner-cpu
 
 jobs:
   build:
@@ -91,6 +97,16 @@ jobs:
             --build-arg RUNNER_BASE_IMAGE=runner-base:ci \
             --build-arg "RUNNER_VERSION=${RUNNER_VERSION}" \
             -t gpu-runner:ci "${ctx}"
+
+      - name: build runner-cpu
+        run: docker build -f images/runner-cpu.Dockerfile -t runner-cpu:ci "$(mktemp -d)"
+
+      - name: smoke test runner-cpu
+        run: |
+          set -euo pipefail
+          docker run --rm runner-cpu:ci docker compose version
+          docker run --rm runner-cpu:ci docker buildx version
+          docker run --rm runner-cpu:ci ./bin/Runner.Listener --version
 
       - name: the baked runner reports the resolved version
         env:
@@ -209,6 +225,35 @@ jobs:
           [[ ${digest} == sha256:* ]] || { echo "::error::no digest for ${ref}"; exit 1; }
           echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
 
+      - name: build, label and push runner-cpu
+        id: cpu
+        env:
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          base=$(sed -n 's/^ARG RUNNER_IMAGE=//p' images/runner-cpu.Dockerfile)
+          ctx=$(mktemp -d)
+          docker build -f images/runner-cpu.Dockerfile \
+            --label "org.opencontainers.image.source=${IMAGE_SOURCE}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.base.name=${base}" \
+            --label "org.opencontainers.image.base.digest=${base##*@}" \
+            -t runner-cpu:build "${ctx}"
+          version=$(docker run --rm runner-cpu:build ./bin/Runner.Listener --version)
+          [[ ${version} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "::error::runner-cpu reports an invalid runner version: ${version}"
+            exit 1
+          }
+          docker run --rm runner-cpu:build docker compose version
+          docker run --rm runner-cpu:build docker buildx version
+          ref="${CPU_IMAGE_NAME}:${version}"
+          docker tag runner-cpu:build "${ref}"
+          docker push "${ref}"
+          digest=$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ ${digest} =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest for ${ref}"; exit 1; }
+          printf 'digest=%s\nversion=%s\n' "${digest}" "${version}" >> "${GITHUB_OUTPUT}"
+
       - name: attest runner-base provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -223,25 +268,40 @@ jobs:
           subject-digest: ${{ steps.gpu.outputs.digest }}
           push-to-registry: true
 
-      # The digests are what an operator pins: deploy/runner-types.sample.yaml
-      # takes the gpu type's image: by @sha256, never by tag.
+      - name: attest runner-cpu provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.CPU_IMAGE_NAME }}
+          subject-digest: ${{ steps.cpu.outputs.digest }}
+          push-to-registry: true
+
+      # Operators use these digests to pin the GPU and CPU runner types.
       - name: job summary
         env:
           RUNNER_VERSION: ${{ steps.version.outputs.version }}
           BASE_DIGEST: ${{ steps.base.outputs.digest }}
           GPU_DIGEST: ${{ steps.gpu.outputs.digest }}
+          CPU_DIGEST: ${{ steps.cpu.outputs.digest }}
+          CPU_VERSION: ${{ steps.cpu.outputs.version }}
         run: |
           {
-            echo "## Published runner images (runner ${RUNNER_VERSION})"
+            echo "## Published runner images"
             echo
             echo "| image | tag | digest |"
             echo "| --- | --- | --- |"
             echo "| \`${BASE_IMAGE_NAME}\` | \`${RUNNER_VERSION}\` | \`${BASE_DIGEST}\` |"
             echo "| \`${GPU_IMAGE_NAME}\` | \`${RUNNER_VERSION}\` | \`${GPU_DIGEST}\` |"
+            echo "| \`${CPU_IMAGE_NAME}\` | \`${CPU_VERSION}\` | \`${CPU_DIGEST}\` |"
             echo
             echo "Pin the gpu runner type by digest (deploy/runner-types.yaml):"
             echo
             echo '```yaml'
             echo "image: ${GPU_IMAGE_NAME}@${GPU_DIGEST}"
+            echo '```'
+            echo
+            echo "Pin the cpu runner type by digest (deploy/runner-types.yaml):"
+            echo
+            echo '```yaml'
+            echo "image: ${CPU_IMAGE_NAME}@${CPU_DIGEST}"
             echo '```'
           } >> "${GITHUB_STEP_SUMMARY}"
