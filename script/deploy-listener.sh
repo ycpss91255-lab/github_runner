@@ -82,7 +82,12 @@ Options:
   --labels <csv>      routing labels for the type. Omit to keep what the config
                       says; a type with no labels routes on its scale set name.
                       THIS IS WHAT WORKFLOWS TARGET, not the scale set name.
-  --group <name>      runner group to create the scale set in (default: Default)
+  --group <name>      runner group the scale set lives in (default: the type's
+                      runner_group, else Default). A scale set name is unique
+                      only within a group: the high-availability layout gives
+                      every host the same name in its own group. A --group that
+                      differs from the config is recorded into a generated
+                      per-type config, so the listener looks in the same group
   --prefix <path>     install prefix (default: /opt/github-runner-listener)
   --etc <path>        config dir (default: /etc/github-runner-listener)
   --unit-dir <path>   where the systemd unit is installed
@@ -253,6 +258,15 @@ main() {
   labels=$(listener_config_labels "${TYPES_CONFIG}" "${TYPE_NAME}")
   image=$(listener_config_image "${TYPES_CONFIG}" "${TYPE_NAME}")
 
+  # The runner group, like the labels: --group overrides what the config says,
+  # and an override is written back into the config (below) so the listener
+  # resolves its scale set in the same group the create used. Empty from an
+  # older admin tool means Default, the only group it ever created in.
+  local config_group chosen_group
+  config_group=$(listener_config_runner_group "${TYPES_CONFIG}" "${TYPE_NAME}")
+  config_group=${config_group:-Default}
+  chosen_group=${GROUP_OPT:-${config_group}}
+
   # The interaction is what settles the labels, and whatever it settles on is
   # written back into the config -- the config does not become a second source
   # of truth, it stays the only one. --labels overrides what is recorded; with
@@ -279,7 +293,7 @@ main() {
     echo "    Target:         ${CONFIG_URL}   ($(listener_config_url_scope "${CONFIG_URL}"))"
     echo "    Scale set:      ${scale_set}   (an identifier)"
     echo "    Routing labels: ${chosen_labels}   (what a workflow's runs-on matches)"
-    echo "    Runner group:   ${GROUP_OPT:-Default}"
+    echo "    Runner group:   ${chosen_group}"
     echo "    Action:         create it if it does not already exist"
   fi
   echo
@@ -362,16 +376,17 @@ main() {
     [[ -n ${LISTENER_TOKEN:-} ]] || { echo "FAIL: no token provided" >&2; exit 1; }
   fi
 
-  # --- record the labels ---------------------------------------------------
+  # --- record the labels and the runner group --------------------------------
   # Whatever the interaction settled on goes into the config, so the routing key
-  # is written down and not just in this terminal's scrollback.
-  if [[ -n ${LABELS_OPT} && ${LABELS_OPT} != "${labels}" ]]; then
+  # and the group are written down and not just in this terminal's scrollback.
+  if [[ ( -n ${LABELS_OPT} && ${LABELS_OPT} != "${labels}" ) ||
+        ${chosen_group} != "${config_group}" ]]; then
     # Keep the generated entry separate so it cannot overwrite the config
     # used by another instance.
     local target_config="${LISTENER_ETC}/runner-types-${LISTENER_TYPE}.yaml"
     listener_write_type_config "${target_config}" \
-      "${LISTENER_TYPE}" "${scale_set}" "${chosen_labels}" "${image}"
-    echo "  config:           recorded labels [${chosen_labels//,/, }] in ${target_config}"
+      "${LISTENER_TYPE}" "${scale_set}" "${chosen_labels}" "${image}" "${chosen_group}"
+    echo "  config:           recorded labels [${chosen_labels//,/, }] and runner group ${chosen_group} in ${target_config}"
     TYPES_CONFIG="${target_config}"
   fi
 
@@ -380,8 +395,10 @@ main() {
     echo "GitHub side: skipped."
   else
     echo "GitHub side:"
-    local admin_args=(create --config "${TYPES_CONFIG}" --type "${LISTENER_TYPE}")
-    [[ -n ${GROUP_OPT} ]] && admin_args+=(--group "${GROUP_OPT}")
+    # Always the group the plan named, so the plan and the create cannot
+    # disagree.
+    local admin_args=(create --config "${TYPES_CONFIG}" --type "${LISTENER_TYPE}"
+      --group "${chosen_group}")
     # The token reaches the child through the ENVIRONMENT, never its argv.
     GITHUB_CONFIG_URL="${CONFIG_URL}" GITHUB_TOKEN="${LISTENER_TOKEN:-}" \
       _scaleset_admin "${admin_args[@]}"

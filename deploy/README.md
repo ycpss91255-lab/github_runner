@@ -455,8 +455,12 @@ the same runner type needs no GitHub-side step at all. If the live scale set's
 labels have drifted from the config, it says so loudly rather than reusing a
 scale set nobody's config describes.
 
-Options: `--group <name>` picks the runner group to create in (default
-`Default`); `--type` may be omitted when the config holds exactly one type.
+Options: `--group <name>` picks the runner group to act in (default: the
+type's `runner_group`, else `Default`; a `--group` that contradicts a configured
+`runner_group` is an error, because the listener looks in the config's group);
+`--type` may be omitted when the config holds exactly one type. `create`,
+`delete` and the listener all resolve the group by name and look the scale set
+up **in that group only** -- see the next section for why.
 `GITHUB_CONFIG_URL` and `GITHUB_TOKEN` are read from the environment and are
 deliberately not flags -- a token in a flag is a token in the host process
 table.
@@ -474,6 +478,51 @@ scaleset-admin delete --config /etc/github-runner-listener/runner-types.yaml \
 ```
 
 Deleting one that is not there succeeds as a no-op, so a teardown can be re-run.
+
+### High availability: the same scale set name in one runner group per host
+
+A job is assigned to a **scale set**, not to a machine. If that scale set's
+only listener is down, the job waits for it -- another host whose listener is
+up, with the very same labels, does not pick it up, because it serves a
+different scale set. Giving every host its own scale set name (`cpu-kai`,
+`cpu-samuel`, ...) therefore gives no failover at all.
+
+GitHub's documented pattern for this is to deploy scale sets with the **same
+name in different runner groups**: see the high availability section of
+[Deploying runner scale sets with Actions Runner Controller](https://docs.github.com/en/actions/tutorials/use-actions-runner-controller/deploy-runner-scale-sets).
+A scale set name is unique only within a runner group, so each host gets:
+
+- its **own runner group** (for example `ci-kai`, `ci-samuel`, `ci-nuc-002`),
+  created by an org owner beforehand -- this repo does not create groups;
+- a scale set with the **same name** as every other host's (for example `cpu`);
+- **identical labels**, so a workflow's `runs-on` matches every host's set and
+  a job can land wherever a listener is up.
+
+The group is recorded per runner type in the config, as `runner_group`, so
+every tool acts on the same set:
+
+```yaml
+runner_types:
+  - name: cpu
+    scale_set: cpu
+    runner_group: ci-kai        # this host's group; omit for Default
+    labels: [self-hosted, linux, x64, cpu]
+    image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:<digest>
+```
+
+- the listener resolves `runner_group` by name and looks its scale set up in
+  that group only (a lookup across all groups is ambiguous once several hold a
+  set named `cpu`); an unknown group is a startup error naming it, and the
+  startup log line names the group;
+- `scaleset-admin create` / `delete` act in that group, and `show` prints it as
+  `runner_group=`;
+- `script/deploy-listener.sh` defaults `--group` to it; an explicit `--group`
+  that differs is written into the generated per-type config
+  (`/etc/github-runner-listener/runner-types-<type>.yaml`) so the listener looks
+  where the create went.
+
+An omitted `runner_group` means `Default`, so an existing single-group install
+keeps working unchanged.
 
 ## 4. Install, enable & start the legacy unit by hand
 

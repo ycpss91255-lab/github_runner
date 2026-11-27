@@ -32,6 +32,16 @@ type RunnerType struct {
 	// against the scale set's LABELS, not against its name. The two coincide
 	// only when the scale set was created with its name as its single label.
 	ScaleSet string `yaml:"scale_set"`
+	// RunnerGroup is the GitHub runner group the scale set lives in. Optional;
+	// empty means DefaultRunnerGroup, so a config written before the field
+	// existed keeps its meaning.
+	//
+	// A scale set name is unique only WITHIN a runner group. The
+	// high-availability layout (deploy/README.md) gives every host the same
+	// scale set name in its own group, so the group is part of which scale set
+	// a listener serves: every lookup is made in this group, never across all
+	// of them (see ResolveScaleSet).
+	RunnerGroup string `yaml:"runner_group"`
 	// Labels are the runs-on labels workflows target this type with.
 	//
 	// THIS IS THE ROUTING KEY. They are fixed on the scale set when it is
@@ -77,6 +87,17 @@ type Concurrency struct {
 	// upward-only -- an operator raises it to leave more headroom for co-tenant
 	// work, and values 1..9 are rejected.
 	Reserve int `yaml:"reserve"`
+}
+
+// EffectiveRunnerGroup is the runner group this type's scale set lives in:
+// the configured runner_group, else DefaultRunnerGroup. It is never empty --
+// an empty group would mean "search every group", which is ambiguous as soon
+// as two groups hold a scale set of the same name.
+func (rt RunnerType) EffectiveRunnerGroup() string {
+	if rt.RunnerGroup != "" {
+		return rt.RunnerGroup
+	}
+	return DefaultRunnerGroup
 }
 
 // DeviceSized reports whether this type sizes its pool from a detected device
@@ -137,7 +158,10 @@ func validate(types []RunnerType) error {
 		return fmt.Errorf("at least one runner type is required")
 	}
 	seenName := make(map[string]bool, len(types))
-	seenScaleSet := make(map[string]bool, len(types))
+	// Scale set names are unique per runner group, so uniqueness is checked on
+	// the (group, name) pair: the same name in two groups is the HA layout.
+	type groupedScaleSet struct{ group, name string }
+	seenScaleSet := make(map[groupedScaleSet]bool, len(types))
 	for i, rt := range types {
 		where := fmt.Sprintf("runner type #%d", i+1)
 		if rt.Name != "" {
@@ -159,10 +183,14 @@ func validate(types []RunnerType) error {
 			return fmt.Errorf("duplicate runner type name %q", rt.Name)
 		}
 		seenName[rt.Name] = true
-		if seenScaleSet[rt.ScaleSet] {
-			return fmt.Errorf("%s: scale set %q is already bound to another runner type (one type -> one scale set)", where, rt.ScaleSet)
+		if err := validateRunnerGroup(rt.RunnerGroup); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
 		}
-		seenScaleSet[rt.ScaleSet] = true
+		key := groupedScaleSet{rt.EffectiveRunnerGroup(), rt.ScaleSet}
+		if seenScaleSet[key] {
+			return fmt.Errorf("%s: scale set %q in runner group %q is already bound to another runner type (one type -> one scale set)", where, rt.ScaleSet, key.group)
+		}
+		seenScaleSet[key] = true
 		if err := validateConcurrency(rt.Concurrency); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
 		}
@@ -172,6 +200,23 @@ func validate(types []RunnerType) error {
 		if err := validateDockerSocket(rt.DockerSocket); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
 		}
+	}
+	return nil
+}
+
+// validateRunnerGroup rejects a runner_group that cannot name a GitHub runner
+// group: surrounding whitespace (a quoting slip that would make the lookup
+// silently find nothing) or a control character. Inner spaces are allowed --
+// GitHub group names may contain them. Empty means the Default group.
+func validateRunnerGroup(group string) error {
+	if group == "" {
+		return nil
+	}
+	if strings.TrimSpace(group) != group {
+		return fmt.Errorf("runner_group %q must not start or end with whitespace", group)
+	}
+	if strings.ContainsFunc(group, unicode.IsControl) {
+		return fmt.Errorf("runner_group %q must not contain control characters", group)
 	}
 	return nil
 }

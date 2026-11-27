@@ -38,6 +38,12 @@
 #   scale_set         required  the GitHub scale set this type binds to; unique
 #                               (one type -> one scale set). An IDENTIFIER --
 #                               NOT what runs-on matches.
+#   runner_group      optional  GitHub runner group the scale set lives in;
+#                               empty = Default. Names are unique only within a
+#                               group, so (runner_group, scale_set) is the
+#                               identity. High availability: give every host
+#                               the SAME scale_set and labels in its OWN group
+#                               (deploy/README.md). The group must exist.
 #   labels            required  THE ROUTING KEY: the runs-on labels workflows
 #                               target this type with. Used verbatim; the scale
 #                               set name is never added to them. To make name
@@ -109,6 +115,9 @@ runner_types:
   # checks that they agree.
   - name: cpu
     scale_set: cpu-runners
+    # This host's runner group (high availability: same scale_set and labels
+    # on every host, one group per host). Omitted = Default.
+    # runner_group: ci-<host>
     labels: [self-hosted, linux, x64, cpu]
     # actions-runner 2.338.2
     image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f

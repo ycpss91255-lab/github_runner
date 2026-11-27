@@ -8,6 +8,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Per-type `runner_group` for high-availability scale sets.** A runner type
+  may name the GitHub runner group its scale set lives in (`runner_group`,
+  optional; empty means `Default`). The listener, `scaleset-admin create`,
+  `delete` and `show` resolve that group by name and look the scale set up in
+  it only, never across groups, so several hosts can each serve a scale set of
+  the same name (for example `cpu`) in their own group with identical labels:
+  GitHub's documented failover pattern, where a job is not stranded behind one
+  host's stopped listener. An unknown group is an error naming it, a
+  `--group` that contradicts the config is an error, the listener's startup
+  log names the group, and `script/deploy-listener.sh` defaults `--group` to
+  the type's `runner_group` (an explicit override is recorded in the generated
+  per-type config). The discrete-env listener path takes `RUNNER_GROUP`.
 - **Daily Docker GC of CI residue on listener hosts.** `listener/docker-gc.sh`
   removes runner images of the CI repositories that were pulled by digest,
   are not pinned by any runner-type config and are used by no container, and

@@ -470,11 +470,11 @@ func TestDescribeType(t *testing.T) {
 		got[k] = v
 	}
 	want := map[string]string{
-		"name":       "gpu",
-		"scale_set":  "gpu-runners",
-		"labels":     "self-hosted,linux,gpu",
-		"image":      "ghcr.io/acme/gpu-runner@sha256:abc",
-		"runs_on":    "runs-on: [self-hosted, linux, gpu]",
+		"name":      "gpu",
+		"scale_set": "gpu-runners",
+		"labels":    "self-hosted,linux,gpu",
+		"image":     "ghcr.io/acme/gpu-runner@sha256:abc",
+		"runs_on":   "runs-on: [self-hosted, linux, gpu]",
 		// No runner_group configured: the report states the group the type
 		// actually resolves to, so the deploy tooling never has to guess.
 		"runner_group": DefaultRunnerGroup,

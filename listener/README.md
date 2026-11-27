@@ -128,6 +128,7 @@ docker run --rm -e GITHUB_CONFIG_URL -e GITHUB_TOKEN -e SCALE_SET_NAME \
 | `SCALE_SET_OWNER` | session owner (listener falls back to the hostname, then a generated UUID) |
 | `GITHUB_TOKEN` | token with scale-set admin scope (required) |
 | `SCALE_SET_NAME` | the scale set to connect to, **by name** (required). An identifier, not the runs-on target -- see above |
+| `RUNNER_GROUP` | runner group the scale set is looked up in (default `Default`). With `RUNNER_TYPES_CONFIG` the type's `runner_group` is used instead. The lookup never searches across groups |
 | `RUNNER_IMAGE` | per-job container image (default `ghcr.io/actions/actions-runner:latest`) |
 | `AUTO_SIZE_DEVICES` | when set, size the pool to the detected device count (#103) instead of reactive live-admission |
 | `DEVICE_DETECT_CMD` | device-enumeration command for auto-sizing (default `nvidia-smi`, one device per output line) |
