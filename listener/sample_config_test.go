@@ -2,7 +2,6 @@ package listener
 
 import (
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -104,12 +103,12 @@ func TestCPUTypeImagePinnedToCurrentRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load sample: %v", err)
 	}
-	const stockImage = "ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
-	publishedImage := regexp.MustCompile(`^ghcr\.io/ycpss91255-lab/runner-cpu@sha256:[0-9a-f]{64}$`)
+	// The published runner-cpu image (actions-runner 2.338.2 + Docker Compose).
+	const publishedImage = "ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f"
 	for _, rt := range types {
 		if rt.Name == "cpu" {
-			if rt.Image != stockImage && !publishedImage.MatchString(rt.Image) {
-				t.Errorf("cpu image = %q, want %q or ghcr.io/ycpss91255-lab/runner-cpu pinned by sha256 digest", rt.Image, stockImage)
+			if rt.Image != publishedImage {
+				t.Errorf("cpu image = %q, want %q", rt.Image, publishedImage)
 			}
 			return
 		}
