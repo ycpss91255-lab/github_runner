@@ -9,6 +9,14 @@ ARG RUNNER_IMAGE=ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e
 # hadolint ignore=DL3006
 FROM ${RUNNER_IMAGE}
 
+USER root
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# BEGIN docker-cli-plugins -- shared by images/runner-cpu.Dockerfile and
+# images/runner-gpu.Dockerfile; keep both copies byte-identical
+# (test/bats/unit/runner_image_dockerfiles.bats checks it). Needs the docker
+# CLI on PATH, USER root and SHELL bash -o pipefail.
+#
 # To bump either plugin, download the new release's checksums.txt and copy
 # the two Linux asset checksums below together with the new version.
 ARG COMPOSE_VERSION=v5.7.1
@@ -18,18 +26,16 @@ ARG BUILDX_VERSION=v0.39.0
 ARG BUILDX_SHA256_AMD64=5fb31a097304fbf6dd4038649a0decf32c2b9510e4047acd7d68b9d700c46194
 ARG BUILDX_SHA256_ARM64=722cdcdfdd6f3fb943fa1ba75102d057feb18ba72aab93b1b0a8cf2b2b48a25f
 ARG TARGETARCH
-
-USER root
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 RUN set -eu; \
     arch=${TARGETARCH:-$(dpkg --print-architecture)}; \
     case "${arch}" in \
       amd64) compose_arch=x86_64; compose_sha=${COMPOSE_SHA256_AMD64}; buildx_sha=${BUILDX_SHA256_AMD64} ;; \
       arm64) compose_arch=aarch64; compose_sha=${COMPOSE_SHA256_ARM64}; buildx_sha=${BUILDX_SHA256_ARM64} ;; \
-      *) echo "Unsupported CPU runner architecture: ${arch}" >&2; exit 1 ;; \
+      *) echo "Unsupported Docker CLI plugin architecture: ${arch}" >&2; exit 1 ;; \
     esac; \
     tmp=$(mktemp -d); \
     plugins=/usr/local/lib/docker/cli-plugins; \
+    install -d -m 0755 "${plugins}"; \
     curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp}/docker-compose" \
       "https://github.com/docker/compose/releases/download/${COMPOSE_VERSION}/docker-compose-linux-${compose_arch}"; \
     curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp}/docker-buildx" \
@@ -43,6 +49,7 @@ RUN set -eu; \
     buildx_version=$(docker buildx version); \
     [[ "${compose_version}" == "${COMPOSE_VERSION#v}" ]] || { echo "Unexpected Compose version: ${compose_version}" >&2; exit 1; }; \
     [[ "${buildx_version}" == *"${BUILDX_VERSION}"* ]] || { echo "Unexpected Buildx version: ${buildx_version}" >&2; exit 1; }
+# END docker-cli-plugins
 
 LABEL org.opencontainers.image.title="github-runner (CPU)" \
       org.opencontainers.image.description="Upstream actions runner with pinned Docker Compose and Buildx plugins" \

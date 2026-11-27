@@ -132,6 +132,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The GPU runner image ships the Docker CLI with Compose and Buildx.**
+  GPU jobs that drive the host Docker daemon failed within seconds with
+  "docker: command not found", because `ghcr.io/ycpss91255-lab/gpu-runner`
+  carried only the runner and the CUDA stack.
+  `images/runner-gpu.Dockerfile` now installs the static docker CLI 29.10.1
+  from download.docker.com, verified by SHA-256 (client only, no daemon),
+  and the same Compose v5.7.1 and Buildx v0.39.0 plugins as the CPU image.
+  The plugin install is one block shared byte-for-byte with
+  `images/runner-cpu.Dockerfile`, so the two images cannot drift. No docker
+  group is baked in; the provisioner's `--group-add` of the socket GID grants
+  access. The PR build and the publish job smoke-test all three commands in
+  the GPU image. The sample GPU type no longer sets `build_tool: kaniko` and
+  shows `docker_socket` as a commented, root-equivalent opt-in.
 - **The orphan sweep now removes stale JIT credential env files.** A job
   killed when the listener restarted left its mode-0600
   `jit-<id>.<rand>.jitconfig.env` file in the runner work folder, because the
