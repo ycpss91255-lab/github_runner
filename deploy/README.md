@@ -395,7 +395,7 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
 
 The first GPU image publish that carries the docker CLI is done and the
 package is public: the sample gpu type pins
-`ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d`
+`ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8`
 (actions-runner 2.338.2). After each later publish of the gpu image, copy the
 new `ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line from the
 workflow's job summary into the gpu type's `image:`, and uncomment
@@ -436,7 +436,7 @@ The first CPU image publish is done and the package is public. The sample's
 CPU type pins it by digest (runner 2.338.2):
 
 ```yaml
-image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f
+image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934
 ```
 
 The workflow's job summary lists the digest of each publish. You can also look
