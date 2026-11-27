@@ -3,6 +3,8 @@ package listener
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -22,14 +24,18 @@ type fakeSession struct {
 	messages       []*scaleset.RunnerScaleSetMessage // scripted, drained front-to-back
 	getErr         error                             // returned once messages are drained (a real transport error)
 	cancel         context.CancelFunc                // if set, called when messages drain to end the loop via ctx
+	polledAfter    []int                             // lastMessageID passed to each GetMessage
+	protocol       []string                          // acquire and ack calls in order
+	closeCtxErr    error                             // context state when Close was called
 	reportedCap    []int                             // maxCapacity passed to each GetMessage
 	deletedIDs     []int                             // messageIDs acked via DeleteMessage
 	acquiredReqIDs [][]int64                         // requestIDs passed to each AcquireJobs
 	closed         bool                              // Close was called (teardown)
 }
 
-func (f *fakeSession) GetMessage(ctx context.Context, _ int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
+func (f *fakeSession) GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
 	f.mu.Lock()
+	f.polledAfter = append(f.polledAfter, lastMessageID)
 	f.reportedCap = append(f.reportedCap, maxCapacity)
 	f.mu.Unlock()
 	if len(f.messages) == 0 {
@@ -43,7 +49,7 @@ func (f *fakeSession) GetMessage(ctx context.Context, _ int, maxCapacity int) (*
 		if f.cancel != nil {
 			f.cancel()
 		}
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("failed to get next message: %w", ctx.Err())
 	}
 	msg := f.messages[0]
 	f.messages = f.messages[1:]
@@ -51,12 +57,14 @@ func (f *fakeSession) GetMessage(ctx context.Context, _ int, maxCapacity int) (*
 }
 
 func (f *fakeSession) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
-	f.acquiredReqIDs = append(f.acquiredReqIDs, requestIDs)
+	f.protocol = append(f.protocol, "acquire")
+	f.acquiredReqIDs = append(f.acquiredReqIDs, slices.Clone(requestIDs))
 	return requestIDs, nil
 }
 
 func (f *fakeSession) DeleteMessage(_ context.Context, messageID int) error {
 	f.mu.Lock()
+	f.protocol = append(f.protocol, fmt.Sprintf("ack %d", messageID))
 	f.deletedIDs = append(f.deletedIDs, messageID)
 	f.mu.Unlock()
 	return nil
@@ -73,8 +81,9 @@ func (f *fakeSession) Session() scaleset.RunnerScaleSetSession {
 	return scaleset.RunnerScaleSetSession{}
 }
 
-func (f *fakeSession) Close(_ context.Context) error {
+func (f *fakeSession) Close(ctx context.Context) error {
 	f.closed = true
+	f.closeCtxErr = ctx.Err()
 	return nil
 }
 
@@ -147,6 +156,54 @@ func msgWithAssigned(id int, totalAssigned int, jobs ...*scaleset.JobAssigned) *
 		MessageID:           id,
 		Statistics:          &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: totalAssigned},
 		JobAssignedMessages: jobs,
+	}
+}
+
+func TestListenAcquiresAvailableJobsAndProvisionsAssignment(t *testing.T) {
+	for _, requestID := range []int64{0, 99} {
+		t.Run(fmt.Sprintf("assigned request ID %d", requestID), func(t *testing.T) {
+			stop := errors.New("end of scripted messages")
+			const jobID = "assigned-job"
+			sess := &fakeSession{
+				messages: []*scaleset.RunnerScaleSetMessage{
+					{
+						MessageID:  17,
+						Statistics: &scaleset.RunnerScaleSetStatistic{},
+						JobAvailableMessages: []*scaleset.JobAvailable{
+							{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41}},
+							{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 82}},
+						},
+					},
+					msgWithAssigned(29, 1, assigned(requestID, jobID, "gpu")),
+				},
+				getErr: stop,
+			}
+			minter := &recordingMinter{config: "encoded-jit"}
+			prov := &recordingProvisioner{}
+			l := New(sess, minter, prov, Config{Image: "runner-image", MaxRunners: 2})
+
+			if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{41, 82}) {
+				t.Errorf("AcquireJobs batches = %v, want [[41 82]] from availability only", sess.acquiredReqIDs)
+			}
+			if want := []string{"ack 17", "acquire", "ack 29"}; !slices.Equal(sess.protocol, want) {
+				t.Errorf("broker calls = %v, want %v", sess.protocol, want)
+			}
+			if want := []int{0, 17, 29}; !slices.Equal(sess.polledAfter, want) {
+				t.Errorf("poll cursors = %v, want %v", sess.polledAfter, want)
+			}
+			if len(minter.gotNames) != 1 {
+				t.Errorf("JIT mint calls = %v, want one", minter.gotNames)
+			}
+			if len(prov.jobs) != 1 {
+				t.Fatalf("provision calls = %d, want one", len(prov.jobs))
+			}
+			if got := prov.jobs[0]; got.JobID != jobID || got.EncodedJITConfig != "encoded-jit" || got.Image != "runner-image" {
+				t.Errorf("provision request = %+v, want assignment %q with minted config and configured image", got, jobID)
+			}
+		})
 	}
 }
 
@@ -339,8 +396,8 @@ func TestProvisionerErrorIsIsolatedLoopContinues(t *testing.T) {
 
 	// The loop ends ONLY via ctx cancellation -- the per-job failure must not
 	// have been returned.
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("per-job failure must not end the loop; got %v want context.Canceled", err)
+	if err != nil {
+		t.Errorf("per-job failure must not end the loop; clean shutdown returned %v", err)
 	}
 	// Both messages were processed -- the loop continued past the failed job.
 	if prov.jobCount() != 2 {
@@ -366,11 +423,14 @@ func TestContextCancellationEndsLoopAndTearsDownSession(t *testing.T) {
 	l := New(sess, &recordingMinter{config: "jit"}, prov, Config{Image: "img"})
 
 	err := l.Listen(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected ctx cancellation to surface as context.Canceled, got %v", err)
+	if err != nil {
+		t.Errorf("Listen returned %v on clean shutdown, want nil", err)
 	}
 	if !sess.closed {
 		t.Error("expected the session to be torn down (Close) on ctx cancellation")
+	}
+	if sess.closeCtxErr != nil {
+		t.Errorf("Close received a cancelled context: %v", sess.closeCtxErr)
 	}
 }
 

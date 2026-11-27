@@ -233,6 +233,22 @@ teardown() { rm -rf "${WORK}"; }
   grep -qx 'RUNNER_TYPE=gpu' "${WORK}/etc/listener.env"
 }
 
+@test "listener_write_env_file sets the target owner and installed script paths" {
+  local file="${WORK}/etc/listener.env" prefix="${WORK}/opt"
+  run bash -c '
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    LISTENER_PREFIX=$3
+    listener_write_env_file "$2" https://github.com/acme /etc/x/runner-types.yaml gpu
+  ' _ "${LIB}" "${file}" "${prefix}"
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c '%a' "${file}")" = 600 ]
+  grep -qxF 'SCALE_SET_OWNER=acme' "${file}"
+  grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
+  grep -qxF "REAP_SCRIPT=${prefix}/listener/reap.sh" "${file}"
+  grep -qxF "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh" "${file}"
+}
+
 @test "listener_write_env_file never prints the token" {
   # The token must not reach stdout/stderr: the deploy command's output is
   # routinely pasted into issues and scrollback.

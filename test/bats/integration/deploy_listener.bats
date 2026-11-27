@@ -262,15 +262,20 @@ EOF
   ! grep -qxF 'name=useradd' "${CAP}"
 }
 
-@test "a second run skips the environment file that is already in place" {
+@test "a second run backfills missing environment keys and preserves overrides" {
+  local file="${ETC}/scaleset-listener.env"
   install -d -m 0755 "${ETC}"
-  printf 'GITHUB_TOKEN=already\n' > "${ETC}/scaleset-listener.env"
-  chmod 600 "${ETC}/scaleset-listener.env"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_TOKEN=already' 'REAP_SCRIPT=/custom/reap.sh' > "${file}"
+
   run _deploy
   [ "${status}" -eq 0 ]
-  [[ "${output}" == *"environment file"* ]]
-  # The existing token is left untouched -- a re-run must not clobber it.
-  grep -qx 'GITHUB_TOKEN=already' "${ETC}/scaleset-listener.env"
+  [ "$(stat -c '%a' "${file}")" = 600 ]
+  [ "$(grep '^GITHUB_TOKEN=' "${file}")" = 'GITHUB_TOKEN=already' ]
+  [ "$(grep '^REAP_SCRIPT=' "${file}")" = 'REAP_SCRIPT=/custom/reap.sh' ]
+  grep -qxF 'SCALE_SET_OWNER=acme' "${file}"
+  grep -qxF "PROVISION_SCRIPT=${PREFIX}/listener/provision-job.sh" "${file}"
+  grep -qxF "HOST_PROBE_CMD=${PREFIX}/listener/host-probe.sh" "${file}"
 }
 
 @test "a second run skips enabling a unit that is already enabled" {
