@@ -2,14 +2,18 @@
 # The sample CPU image and the self-built images must agree on the runner
 # release. GitHub stops dispatching jobs to stale runners with self-update
 # disabled, so the operator examples and recovery guidance must stay in sync.
+# The CPU plugin image keeps that same upstream pin while operators switch
+# the sample over to the published digest once it is available.
 # These tripwires inspect the shipped files without Docker or the network.
 
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   SAMPLE="${ROOT}/deploy/runner-types.sample.yaml"
+  CPU="${ROOT}/images/runner-cpu.Dockerfile"
   README="${ROOT}/deploy/README.md"
   CHANGELOG="${ROOT}/doc/changelog/CHANGELOG.md"
   CURRENT_VERSION="2.338.2"
+  STOCK_CPU_IMAGE="ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
 }
 
 # Print the CPU image and its immediately preceding line.
@@ -26,9 +30,44 @@ fallback_version() {
     "${ROOT}/lib/runner-release.sh"
 }
 
-@test "sample CPU image pins the current actions-runner digest" {
+@test "sample CPU image pins either the stock runner or the published runner-cpu image" {
   image="$(cpu_image_with_previous_line | sed -n '2s/^    image: //p')"
-  [ "${image}" = "ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300" ]
+  [[ "${image}" == "${STOCK_CPU_IMAGE}" ||
+    "${image}" =~ ^ghcr\.io/ycpss91255-lab/runner-cpu@sha256:[0-9a-f]{64}$ ]]
+}
+
+@test "CPU Dockerfile defaults to the current stock actions-runner digest" {
+  run sed -n 's/^ARG RUNNER_IMAGE=//p' "${CPU}"
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "${STOCK_CPU_IMAGE}" ]
+}
+
+@test "CPU Dockerfile labels its upstream pin with the fallback runner version" {
+  run awk '/^ARG RUNNER_IMAGE=/ { print previous } { previous = $0 }' "${CPU}"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" =~ ^#\ actions-runner\ [0-9]+\.[0-9]+\.[0-9]+$ ]]
+  [ "${output}" = "# actions-runner $(fallback_version)" ]
+}
+
+@test "deployment README section 3b documents the CPU digest pin and compose plugin" {
+  section="$(awk '
+    /^## 3b\./ { section = 1; next }
+    section && /^## / { exit }
+    section { print }
+  ' "${README}")"
+  grep -qF 'ghcr.io/ycpss91255-lab/runner-cpu@sha256' <<<"${section}"
+  grep -qF 'docker compose' <<<"${section}"
+}
+
+@test "Unreleased Added changelog records the CPU image and compose plugin" {
+  added="$(awk '
+    /^## \[Unreleased\][[:space:]]*$/ { unreleased = 1; next }
+    unreleased && /^## / { exit }
+    unreleased && /^### / { added = ($0 ~ /^### Added[[:space:]]*$/); next }
+    added { print }
+  ' "${CHANGELOG}")"
+  grep -qF 'ghcr.io/ycpss91255-lab/runner-cpu' <<<"${added}"
+  grep -iqw 'compose' <<<"${added}"
 }
 
 @test "CPU image is immediately preceded by an actions-runner version matching the fallback" {

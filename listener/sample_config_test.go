@@ -2,6 +2,7 @@ package listener
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -44,7 +45,7 @@ func TestSampleConfigLoads(t *testing.T) {
 	}
 }
 
-// The plain CPU type references the upstream actions-runner image pinned by a
+// The CPU type references a runner image pinned by a
 // sha256 DIGEST, never a floating :latest tag (#122). This is the AFK proof
 // that the digest-pin wiring is what the authoritative parser actually loads
 // from the shipped sample -- so the documented "no :latest" guarantee can't
@@ -103,11 +104,12 @@ func TestCPUTypeImagePinnedToCurrentRunner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load sample: %v", err)
 	}
-	const wantImage = "ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
+	const stockImage = "ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
+	publishedImage := regexp.MustCompile(`^ghcr\.io/ycpss91255-lab/runner-cpu@sha256:[0-9a-f]{64}$`)
 	for _, rt := range types {
 		if rt.Name == "cpu" {
-			if rt.Image != wantImage {
-				t.Errorf("cpu image = %q, want %q", rt.Image, wantImage)
+			if rt.Image != stockImage && !publishedImage.MatchString(rt.Image) {
+				t.Errorf("cpu image = %q, want %q or ghcr.io/ycpss91255-lab/runner-cpu pinned by sha256 digest", rt.Image, stockImage)
 			}
 			return
 		}

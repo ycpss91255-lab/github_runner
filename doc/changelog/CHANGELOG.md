@@ -8,6 +8,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Publish a CPU runner image with Docker Compose.**
+  `images/runner-cpu.Dockerfile` builds `ghcr.io/ycpss91255-lab/runner-cpu`
+  with Docker Compose v5.7.1 and Buildx v0.39.0, both verified by SHA-256.
+  On the stock image, `docker compose` failed with "unknown shorthand flag 'f'"
+  when passed a Compose file. The CPU sample keeps the stock digest until the
+  first publish.
 - **Same-path work folders for Docker socket jobs.** Socket-enabled runner
   types use a per-job work folder mounted at the same path on the host and in
   the runner. Compose and other sibling containers can bind-mount the checkout.

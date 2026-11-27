@@ -6,12 +6,88 @@
 #     NEVER downloads a runner tarball itself,
 #   * every FROM is pinned by digest (no floating :latest baked in),
 #   * the GPU image LAYERS on the SEC-5 base (so it inherits the verified
-#     runner) and is NOT --privileged.
+#     runner) and is NOT --privileged,
+#   * the CPU image keeps the upstream runner pinned and installs only
+#     versioned, checksum-verified Docker CLI plugins from their release repos.
 
 setup() {
   IMAGES="${BATS_TEST_DIRNAME}/../../../images"
   BASE="${IMAGES}/runner-base.Dockerfile"
   GPU="${IMAGES}/runner-gpu.Dockerfile"
+  CPU="${IMAGES}/runner-cpu.Dockerfile"
+}
+
+# Ignore Dockerfile comments when checking executable lines.
+cpu_instructions() {
+  [ -f "${CPU}" ] || return 1
+  sed '/^[[:space:]]*#/d' "${CPU}"
+}
+
+@test "CPU Dockerfile builds from a digest-pinned upstream runner" {
+  [ -f "${CPU}" ]
+  grep -Eq '^ARG RUNNER_IMAGE=ghcr\.io/actions/actions-runner@sha256:[0-9a-f]{64}[[:space:]]*$' "${CPU}"
+  grep -Eq '^FROM \$\{RUNNER_IMAGE\}[[:space:]]*$' "${CPU}"
+}
+
+@test "CPU Dockerfile pins compose and buildx to exact release versions" {
+  local plugin
+  for plugin in COMPOSE BUILDX; do
+    run grep -E "^ARG ${plugin}_VERSION=" "${CPU}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" =~ ^ARG\ ${plugin}_VERSION=v[0-9]+\.[0-9]+\.[0-9]+[[:blank:]]*$ ]]
+  done
+}
+
+@test "CPU Dockerfile declares and checks per-architecture plugin checksums" {
+  local arg
+  for arg in COMPOSE_SHA256_AMD64 COMPOSE_SHA256_ARM64 BUILDX_SHA256_AMD64 BUILDX_SHA256_ARM64; do
+    run grep -E "^ARG ${arg}=" "${CPU}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" =~ ^ARG\ ${arg}=[0-9a-f]{64}[[:blank:]]*$ ]]
+  done
+  run cpu_instructions
+  [ "${status}" -eq 0 ]
+  grep -Eq '(^|[[:space:]|&;])sha256sum[[:space:]]+-c([[:space:]]|$)' <<<"${output}"
+}
+
+@test "CPU Dockerfile uses only official plugin release URLs and never pipes into a shell" {
+  local url
+  run cpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  run grep -E '\|[[:space:]]*([^[:space:]|;]+/)?(sh|bash)([[:space:];&|]|$)' <<<"${instructions}"
+  [ "${status}" -eq 1 ]
+  # Match an approved prefix or the scheme alone, so even two URLs in one
+  # shell argument are independently checked.
+  run grep -ioE 'https://github\.com/docker/(compose|buildx)/releases/download/|https?://' <<<"${instructions}"
+  [ "${status}" -eq 0 ]
+  for url in "${lines[@]}"; do
+    case "${url}" in
+      https://github.com/docker/compose/releases/download/*|https://github.com/docker/buildx/releases/download/*) ;;
+      *) echo "unexpected CPU plugin URL: ${url}"; return 1 ;;
+    esac
+  done
+  [[ "${output}" == *"https://github.com/docker/compose/releases/download/"* ]]
+  [[ "${output}" == *"https://github.com/docker/buildx/releases/download/"* ]]
+}
+
+@test "CPU Dockerfile installs both Docker CLI plugins" {
+  run cpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  grep -qF '/usr/local/lib/docker/cli-plugins' <<<"${instructions}"
+  grep -Eq '(install|cp|mv)[[:blank:]].*/docker-compose([^[:alnum:]_-]|$)' <<<"${instructions}"
+  grep -Eq '(install|cp|mv)[[:blank:]].*/docker-buildx([^[:alnum:]_-]|$)' <<<"${instructions}"
+}
+
+@test "CPU Dockerfile ends as runner and never bakes in --privileged" {
+  run cpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  run grep -F -- '--privileged' <<<"${instructions}"
+  [ "${status}" -eq 1 ]
+  run bash -c 'grep -iE "^[[:blank:]]*USER[[:blank:]]" | tail -n 1' <<<"${instructions}"
+  [[ "${output}" =~ ^[[:blank:]]*USER[[:blank:]]+runner[[:blank:]]*$ ]]
 }
 
 @test "base Dockerfile pins its base image by sha256 digest (#120)" {

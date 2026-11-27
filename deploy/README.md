@@ -299,16 +299,13 @@ startup sweep can remove those containers as orphans.
 
 ## 3b. Build (or pin) the per-type runner images (#92: #120/#121/#122)
 
-The `image` each runner type references is produced one of two ways (ADR-0001
-"Runner images"):
-
 **CI publishes the self-built images.** The `runner images` workflow
-(`.github/workflows/runner-images.yaml`) builds the SEC-5 base and the GPU
-image on a GitHub-hosted runner, through the same script and Dockerfile shown
-below, and pushes them to:
+(`.github/workflows/runner-images.yaml`) builds all three images on a
+GitHub-hosted runner and pushes the following tags.
 
 - `ghcr.io/ycpss91255-lab/runner-base:<runner-version>`
 - `ghcr.io/ycpss91255-lab/gpu-runner:<runner-version>`
+- `ghcr.io/ycpss91255-lab/runner-cpu:<runner-version>`
 
 It runs on every push to `main` that changes `images/**`, and on demand:
 
@@ -318,17 +315,17 @@ gh workflow run runner-images.yaml --ref main -f runner_version=2.338.2
 gh run watch "$(gh run list --workflow runner-images.yaml --limit 1 --json databaseId -q '.[0].databaseId')"
 ```
 
-The run's **job summary** lists both digests and the ready-to-paste
-`image: ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line for the gpu
-type -- pin that, never the tag. Each image carries an
+The run's **job summary** lists all three digests and ready-to-paste
+`image:` lines for the GPU and CPU types. Pin the image by digest. Each
+image carries an
 `org.opencontainers.image.source` label linking the package to this repository,
 and a signed build provenance attestation you can check with
 `gh attestation verify oci://ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest> --repo ycpss91255-lab/github_runner`.
-A pull request that touches `images/**` builds both images without pushing.
+A pull request that touches `images/**` builds all three images without pushing.
 
 > **First publish.** A package an organisation publishes for the first time is
 > created **private**. Until an org owner makes it public (package settings ->
-> Change visibility), a GPU host must `docker login ghcr.io` with a token that
+> Change visibility), a runner host must `docker login ghcr.io` with a token that
 > has `read:packages` before it can pull the image.
 
 The manual build below is the fallback, for a registry other than this
@@ -369,16 +366,32 @@ docker buildx imagetools inspect ghcr.io/your-org/gpu-runner:2.338.2   # copy Di
 > into the GPU runner-type config AFK; running a real GPU job needs a host with
 > the NVIDIA driver + container runtime — an operator step on the target host.
 
-**Plain CPU type — pin the upstream image by digest (#122).** A CPU type needs
-no self-built image; it uses the **official** `ghcr.io/actions/actions-runner`
-image pinned by `@sha256:` digest. When updating the CPU sample, bump the
-digest, its `# actions-runner X.Y.Z` comment, and `RUNNER_VERSION_FALLBACK` in
-`lib/runner-release.sh` together. Inspect the version you validated and copy
-the top-level digest into the CPU type's `image:` field.
+**CPU image with Docker CLI plugins (#122).** The stock actions-runner image
+lacks Docker Compose. `images/runner-cpu.Dockerfile` adds Compose v5.7.1 and
+replaces the bundled Buildx with v0.39.0. The build verifies both binaries
+against SHA-256 checksums from the official GitHub releases. The CPU tag
+comes from the runner binary in the digest-pinned upstream image.
+The workflow's `runner_version` input selects the base and GPU versions.
+
+The sample uses the stock digest until the first CPU image publish. After
+that publish, copy the digest from the workflow's job summary and set the
+CPU type's `image:` to `ghcr.io/ycpss91255-lab/runner-cpu@sha256:<digest>`.
+You can also look up the published digest by tag.
 
 ```sh
-docker buildx imagetools inspect ghcr.io/actions/actions-runner:2.338.2
+docker buildx imagetools inspect ghcr.io/ycpss91255-lab/runner-cpu:2.338.2
 ```
+
+To build and check the CPU image locally, run these commands from the repo root.
+
+```sh
+docker build -f images/runner-cpu.Dockerfile -t runner-cpu:2.338.2 .
+docker run --rm runner-cpu:2.338.2 docker compose version
+```
+
+When bumping the stock digest in `images/runner-cpu.Dockerfile`, update the
+sample digest, the `# actions-runner X.Y.Z` version comments, and
+`RUNNER_VERSION_FALLBACK` in `lib/runner-release.sh` together.
 
 ## 3c. Create the runner type's scale set on GitHub (`scaleset-admin`)
 

@@ -23,9 +23,9 @@ COVERAGE_IMAGE := env_var_or_default('COVERAGE_IMAGE', 'kcov/kcov:latest')
 
 SCRIPTS := 'script/install-deps.sh script/init.sh script/add-runner.sh script/remove-runner.sh script/status.sh script/update.sh script/uninstall.sh script/cleanup.sh script/schedule-cleanup.sh script/configure.sh script/set-labels.sh script/check-token.sh lib/common.sh lib/runner-layout.sh lib/runner-service.sh lib/runner-release.sh lib/runner-config.sh lib/runner-container.sh lib/runner-build.sh lib/runner-reaper.sh lib/runner-history.sh script/history.sh listener/provision-job.sh listener/reap.sh listener/host-probe.sh images/build-runner-image.sh script/lint-adr.sh script/fetch-bats.sh script/coverage-gate.sh script/lint-changelog.sh script/lint-readme-sync.sh script/lint-doc-citations.sh script/deploy-listener.sh script/teardown-listener.sh lib/listener-deploy.sh'
 
-# Self-built runner-image Dockerfiles (#120/#121), hadolint-checked. The
+# Self-built runner-image Dockerfiles (#120/#121/#122), hadolint-checked. The
 # test-tools image ships hadolint, so this needs no extra dependency.
-DOCKERFILES := 'images/runner-base.Dockerfile images/runner-gpu.Dockerfile'
+DOCKERFILES := 'images/runner-base.Dockerfile images/runner-gpu.Dockerfile images/runner-cpu.Dockerfile'
 
 # ShellCheck / hadolint / bats all run inside the test-tools container.
 _docker_run := 'docker run --rm -v "$PWD:/source" -w /source ' + TEST_TOOLS_IMAGE
