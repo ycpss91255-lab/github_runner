@@ -8,6 +8,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Opt-in Docker check in the self-hosted smoke workflow.** Dispatch
+  `selfhosted-smoke.yaml` with `-f docker=true` on a `docker_socket` runner
+  type to prove the job reaches the host daemon: `docker run` with same-path
+  workspace and `RUNNER_TEMP` mounts, `docker build`, `docker buildx build
+  --load`, and a `docker compose run` with a `./` bind mount. The input
+  defaults to `false`, and the workflow stays manual-only.
 - **Publish a CPU runner image with Docker Compose.**
   `images/runner-cpu.Dockerfile` builds `ghcr.io/ycpss91255-lab/runner-cpu`
   with Docker Compose v5.7.1 and Buildx v0.39.0, both verified by SHA-256.
