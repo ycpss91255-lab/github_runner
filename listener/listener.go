@@ -89,6 +89,9 @@ type ProvisionRequest struct {
 	// ("kaniko"/"buildkit"), or empty for none -- routes build jobs to the
 	// daemonless build seam (#119).
 	BuildTool string
+	// DockerSocket is the host Docker socket path to mount for this job.
+	// Empty disables the mount.
+	DockerSocket string
 }
 
 // Provisioner runs one ephemeral job in a throwaway container. The production
@@ -183,6 +186,9 @@ type Config struct {
 	// carried into every ProvisionRequest to route build jobs to the daemonless
 	// seam (#119). Empty = none.
 	BuildTool string
+	// DockerSocket is this runner type's opt-in host Docker socket path,
+	// carried into every ProvisionRequest. Empty disables the mount.
+	DockerSocket string
 	// MaxRunners is the worker-pool bound: the ceiling on concurrently-
 	// provisioned runners and the max capacity advertised to GitHub.
 	// Zero falls back to defaultPoolBound. When DeviceDetector is set (#103) the
@@ -490,6 +496,7 @@ func (l *Listener) reconcile(ctx context.Context, stats *scaleset.RunnerScaleSet
 				Devices:          l.cfg.Devices,
 				Runtime:          l.cfg.Runtime,
 				BuildTool:        l.cfg.BuildTool,
+				DockerSocket:     l.cfg.DockerSocket,
 			},
 		}
 		if hasAssignment {

@@ -42,10 +42,11 @@ type InstanceDeps struct {
 // operator count -- the concurrent-runner number is derived, not configured.
 func (rt RunnerType) Instance(deps InstanceDeps) Instance {
 	cfg := Config{
-		Image:     rt.Image,
-		Devices:   rt.Devices,
-		Runtime:   rt.Runtime,
-		BuildTool: rt.BuildTool,
+		Image:        rt.Image,
+		Devices:      rt.Devices,
+		Runtime:      rt.Runtime,
+		BuildTool:    rt.BuildTool,
+		DockerSocket: rt.DockerSocket,
 	}
 	if rt.Concurrency.DeviceSized() {
 		cfg.DeviceDetector = deps.Detector

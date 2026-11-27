@@ -253,3 +253,37 @@ func TestContainerProvisionerPropagatesFailure(t *testing.T) {
 		t.Fatal("expected an error when the container script exits non-zero")
 	}
 }
+
+func TestContainerProvisionerDockerSocketEnv(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		socket string
+	}{
+		{"passes configured socket", "/var/run/docker.sock"},
+		{"overrides inherited socket with explicit empty value", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("RUNNER_DOCKER_SOCKET", "/leaked.sock")
+			capFile := filepath.Join(t.TempDir(), "env")
+			script := writeScript(t, "#!/usr/bin/env bash\n"+
+				"printf '%s\\n' \"${RUNNER_DOCKER_SOCKET-<unset>}\" > '"+capFile+"'\n")
+			p := &ContainerProvisioner{Script: script}
+			err := p.Provision(context.Background(), ProvisionRequest{
+				JobID:            "job-socket",
+				Image:            "img",
+				EncodedJITConfig: "ENC",
+				DockerSocket:     tc.socket,
+			})
+			if err != nil {
+				t.Fatalf("Provision: %v", err)
+			}
+			got, err := os.ReadFile(capFile)
+			if err != nil {
+				t.Fatalf("read capture: %v", err)
+			}
+			if want := tc.socket + "\n"; string(got) != want {
+				t.Errorf("RUNNER_DOCKER_SOCKET capture = %q, want %q", got, want)
+			}
+		})
+	}
+}

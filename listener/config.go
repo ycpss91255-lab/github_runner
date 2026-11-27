@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -15,8 +18,8 @@ import (
 // homogeneous class of ephemeral runner and maps to exactly one GitHub scale
 // set. Go is the single parser of record (ADR-0003): it reads the whole entry,
 // then passes only the per-job fields a provision needs (image, devices,
-// runtime, build tool) across the shell-out boundary to the
-// bash provisioner -- bash never parses this config.
+// runtime, build tool, Docker socket) across the shell-out boundary to the bash
+// provisioner -- bash never parses this config.
 type RunnerType struct {
 	// Name is the operator-facing identifier for this type, unique across the
 	// config (used in logs and to disambiguate listener instances).
@@ -51,6 +54,9 @@ type RunnerType struct {
 	// BuildTool is the daemonless image builder this type offers jobs (e.g.
 	// "kaniko", "buildkit"). Empty = none.
 	BuildTool string `yaml:"build_tool"`
+	// DockerSocket opts this type into root-equivalent access to the host
+	// Docker daemon through this socket path. Empty = off.
+	DockerSocket string `yaml:"docker_socket"`
 	// Concurrency is the worker-pool sizing for this type. Auto by default
 	// (sized from host capacity, e.g. GPU count -- #113).
 	Concurrency Concurrency `yaml:"concurrency"`
@@ -163,6 +169,25 @@ func validate(types []RunnerType) error {
 		if err := validateBuildTool(rt.BuildTool); err != nil {
 			return fmt.Errorf("%s: %w", where, err)
 		}
+		if err := validateDockerSocket(rt.DockerSocket); err != nil {
+			return fmt.Errorf("%s: %w", where, err)
+		}
+	}
+	return nil
+}
+
+// validateDockerSocket checks the host path before it is used in a volume spec.
+func validateDockerSocket(path string) error {
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "/") || filepath.Clean(path) != path {
+		return fmt.Errorf("docker_socket %q must be a clean absolute path", path)
+	}
+	if strings.Contains(path, ":") || strings.ContainsFunc(path, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) {
+		return fmt.Errorf("docker_socket %q must not contain colons, whitespace, or control characters", path)
 	}
 	return nil
 }
