@@ -23,7 +23,7 @@ bats_require_minimum_version 1.5.0
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   LIB="${ROOT}/lib/listener-deploy.sh"
-  WORK=$(mktemp -d)
+  WORK=$(mktemp -d "${BATS_TEST_TMPDIR}/host.XXXXXX")
   mkdir -p "${WORK}/stub"
   cat > "${WORK}/stub/hostname" <<'EOF'
 #!/bin/bash
@@ -43,8 +43,8 @@ teardown() { rm -rf "${WORK}"; }
     LISTENER_PREFIX=/opt/x
     LISTENER_ETC=/etc/x
     listener_deploy_paths
-    echo \"\${LISTENER_ENV_FILE}\"
-    echo \"\${LISTENER_UNIT_PATH}\"
+    echo \"\${LISTENER_LEGACY_ENV_FILE}\"
+    echo \"\${LISTENER_LEGACY_UNIT_PATH}\"
     echo \"\${LISTENER_BIN}\"
     echo \"\${LISTENER_ADMIN_BIN}\"
   "
@@ -62,7 +62,7 @@ teardown() { rm -rf "${WORK}"; }
     source '${LIB}'
     LISTENER_PREFIX=/opt/a; LISTENER_ETC=/etc/a; listener_deploy_paths
     LISTENER_PREFIX=/opt/b; LISTENER_ETC=/etc/b; listener_deploy_paths
-    echo \"\${LISTENER_BIN} \${LISTENER_ENV_FILE}\"
+    echo \"\${LISTENER_BIN} \${LISTENER_LEGACY_ENV_FILE}\"
   "
   [ "${status}" -eq 0 ]
   [ "${output}" = "/opt/b/bin/scaleset-listener /etc/b/scaleset-listener.env" ]
@@ -187,39 +187,36 @@ teardown() { rm -rf "${WORK}"; }
 
 # --- the runner state tree (work root + history) ----------------------------
 
-@test "listener_deploy_paths derives the runner home and work root from the prefix" {
-  run bash -c "
-    source '${LIB}'
-    LISTENER_PREFIX=/opt/x; LISTENER_ETC=/etc/x; listener_deploy_paths
-    echo \"\${LISTENER_RUNNER_HOME} \${LISTENER_WORK_ROOT}\"
-  "
-  [ "${status}" -eq 0 ]
-  [ "${output}" = "/opt/x/runners /opt/x/runners/work" ]
-}
-
 @test "listener_ensure_work_root creates the runner home and work root owned by the user" {
   run bash -c "
     source '${LIB}'
     LISTENER_PREFIX='${WORK}/opt'; LISTENER_ETC='${WORK}/etc'; listener_deploy_paths
+    LISTENER_RUNNER_HOME=\$LISTENER_PREFIX/runners/gpu
+    LISTENER_WORK_ROOT=\$LISTENER_RUNNER_HOME/work
     _chown() { echo \"CHOWN \$*\"; }
     listener_ensure_work_root ci-runner
   "
   [ "${status}" -eq 0 ]
-  [ -d "${WORK}/opt/runners/work" ]
-  [[ "${output}" == *"CHOWN ci-runner:ci-runner ${WORK}/opt/runners ${WORK}/opt/runners/work"* ]]
+  [ -d "${WORK}/opt/runners/gpu/work" ]
+  local dir
+  for dir in runners runners/gpu runners/gpu/work; do
+    [[ "${output}" == *"CHOWN ci-runner:ci-runner"*"${WORK}/opt/${dir}"* ]]
+  done
 }
 
 @test "listener_ensure_work_root is safe to re-run on an existing tree (idempotent)" {
-  mkdir -p "${WORK}/opt/runners/work/jit-leftover"
+  mkdir -p "${WORK}/opt/runners/gpu/work/jit-leftover"
   run bash -c "
     source '${LIB}'
     LISTENER_PREFIX='${WORK}/opt'; LISTENER_ETC='${WORK}/etc'; listener_deploy_paths
+    LISTENER_RUNNER_HOME=\$LISTENER_PREFIX/runners/gpu
+    LISTENER_WORK_ROOT=\$LISTENER_RUNNER_HOME/work
     _chown() { :; }
     listener_ensure_work_root ci-runner
   "
   [ "${status}" -eq 0 ]
-  # Existing contents are left alone: only the two directories are ensured.
-  [ -d "${WORK}/opt/runners/work/jit-leftover" ]
+  # Existing job directories are left alone.
+  [ -d "${WORK}/opt/runners/gpu/work/jit-leftover" ]
 }
 
 # --- the environment file (the secret) -------------------------------------
@@ -271,16 +268,23 @@ teardown() { rm -rf "${WORK}"; }
 @test "listener_write_env_file creates the file 0600 BEFORE the token is in it" {
   # A file created 0644 and chmodded afterwards is world-readable for the window
   # in between. The content must never exist at a permissive mode.
-  run bash -c "
-    source '${LIB}'
-    LISTENER_TOKEN='s3cr3t-token'
-    listener_write_env_file '${WORK}/d/listener.env' https://github.com/acme /c.yaml gpu
-    stat -c '%a' '${WORK}/d/listener.env'
-  "
+  run bash -c '
+    source "$1"
+    LISTENER_TOKEN=s3cr3t-token
+    file=$2
+    install() {
+      command install "$@" || return
+      if [[ ${!#} == "${file}" ]]; then
+        [[ -f ${file} && ! -s ${file} ]] || return 1
+        printf "empty file at mode %s\n" "$(stat -c %a "${file}")"
+      fi
+    }
+    listener_write_env_file "${file}" https://github.com/acme /c.yaml gpu
+  ' _ "${LIB}" "${WORK}/d/gpu.env"
   [ "${status}" -eq 0 ]
-  [[ "${output}" == *"600"* ]]
-  # The containing directory is created too, and is not world-writable.
-  [ -d "${WORK}/d" ]
+  [[ "${output}" == *"empty file at mode 600"* ]]
+  grep -qxF 'GITHUB_TOKEN=s3cr3t-token' "${WORK}/d/gpu.env"
+  [ "$(stat -c '%a' "${WORK}/d")" = 755 ]
 }
 
 @test "listener_write_env_file refuses to run with no token (fails closed)" {
@@ -999,4 +1003,42 @@ teardown() { rm -rf "${WORK}"; }
   if [[ -f ${file} ]]; then
     ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
   fi
+}
+
+@test "listener_valid_type_name accepts safe type names up to 63 characters" {
+  local name longest
+  printf -v longest 'g%062d' 0
+  for name in gpu cpu gpu-ada2000 0 gpu_2 "${longest}"; do
+    run bash -c 'source "$1"; declare -F listener_valid_type_name >/dev/null || exit 2; listener_valid_type_name "$2"' _ "${LIB}" "${name}"
+    [ "${status}" -eq 0 ]
+  done
+}
+
+@test "listener_valid_type_name rejects unsafe and reserved type names" {
+  local name too_long
+  printf -v too_long 'g%063d' 0
+  for name in '' ../x a/b GPU work history -x _x 'two words' "${too_long}"; do
+    run bash -c 'source "$1"; declare -F listener_valid_type_name >/dev/null || exit 2; listener_valid_type_name "$2"' _ "${LIB}" "${name}"
+    [ "${status}" -eq 1 ]
+  done
+}
+
+@test "the listener template isolates its writable state and retains service hardening" {
+  local unit="${ROOT}/deploy/scaleset-listener@.service" setting
+  [ -f "${unit}" ]
+  grep -qE '^Description=.*%i' "${unit}"
+  [ "$(sed -n 's/^EnvironmentFile=//p' "${unit}")" = '/etc/github-runner-listener/%i.env' ]
+  [ "$(sed -n 's/^ReadWritePaths=//p' "${unit}")" = '/opt/github-runner-listener/runners/%i' ]
+  for setting in \
+    'User=ci-runner' 'Group=ci-runner' \
+    'WorkingDirectory=/opt/github-runner-listener/listener' \
+    'ExecStart=/opt/github-runner-listener/bin/scaleset-listener' \
+    'Restart=always' 'RestartSec=5' 'KillSignal=SIGTERM' 'TimeoutStopSec=120' \
+    'NoNewPrivileges=true' 'ProtectSystem=strict' 'ProtectHome=true' \
+    'PrivateTmp=true' 'ProtectControlGroups=true' 'ProtectKernelModules=true' \
+    'ProtectKernelTunables=true' 'RestrictSUIDSGID=true'; do
+    grep -qxF "${setting}" "${unit}"
+  done
+  ! grep -vE '^[[:space:]]*[#;]' "${unit}" |
+    grep -qiE 'GITHUB_TOKEN|--(token|privileged)([[:space:]=]|$)' || false
 }

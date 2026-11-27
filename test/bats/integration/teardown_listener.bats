@@ -11,7 +11,7 @@
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   SCRIPT="${ROOT}/script/teardown-listener.sh"
-  WORK=$(mktemp -d)
+  WORK=$(mktemp -d "${BATS_TEST_TMPDIR}/host.XXXXXX")
   STUB="${WORK}/stub"
   mkdir -p "${STUB}"
   CAP="${WORK}/argv.log"
@@ -29,17 +29,17 @@ setup() {
   printf 'GITHUB_TOKEN=tok-abc123\n' > "${ETC}/scaleset-listener.env"
   chmod 600 "${ETC}/scaleset-listener.env"
   printf '[Service]\n' > "${UNIT_DIR}/scaleset-listener.service"
-  : > "${STUB_STATE}/started"
-  : > "${STUB_STATE}/enabled"
+  : > "${STUB_STATE}/scaleset-listener.service.started"
+  : > "${STUB_STATE}/scaleset-listener.service.enabled"
 
   cat > "${STUB}/systemctl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "name=systemctl" "$@" >> "${CAP_FILE}"
 case "$1" in
-  is-active)  [ -e "${STUB_STATE}/started" ] && { echo active; exit 0; }; exit 3 ;;
-  is-enabled) [ -e "${STUB_STATE}/enabled" ] && { echo enabled; exit 0; }; exit 1 ;;
-  stop)       rm -f "${STUB_STATE}/started"; exit 0 ;;
-  disable)    rm -f "${STUB_STATE}/enabled"; exit 0 ;;
+  is-active)  [ -e "${STUB_STATE}/$2.started" ] && { echo active; exit 0; }; exit 3 ;;
+  is-enabled) [ -e "${STUB_STATE}/$2.enabled" ] && { echo enabled; exit 0; }; exit 1 ;;
+  stop)       rm -f "${STUB_STATE}/$2.started"; exit 0 ;;
+  disable)    rm -f "${STUB_STATE}/$2.enabled"; exit 0 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -86,7 +86,7 @@ _teardown_run() {
 
 @test "a teardown of a machine that was never deployed succeeds" {
   rm -rf "${PREFIX}" "${ETC}" "${UNIT_DIR}"
-  rm -f "${STUB_STATE}/started" "${STUB_STATE}/enabled"
+  rm -f "${STUB_STATE}/scaleset-listener.service.started" "${STUB_STATE}/scaleset-listener.service.enabled"
   run _teardown_run
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"skipped"* ]]
@@ -122,4 +122,107 @@ _teardown_run() {
   [[ "${output}" == *"normalized"* ]]
   # Nothing was removed by any of the refusals.
   [ -d "${PREFIX}" ]
+}
+
+_seed_instances() {
+  local type
+  printf '[Service]\n' > "${UNIT_DIR}/scaleset-listener@.service"
+  for type in gpu cpu; do
+    mkdir -p "${PREFIX}/runners/${type}/work"
+    install -m 0600 /dev/null "${ETC}/${type}.env"
+    printf 'RUNNER_TYPE=%s\nGITHUB_TOKEN=tok-%s\n' "${type}" "${type}" > "${ETC}/${type}.env"
+    : > "${STUB_STATE}/scaleset-listener@${type}.service.started"
+    : > "${STUB_STATE}/scaleset-listener@${type}.service.enabled"
+  done
+}
+
+_assert_unit_stopped_and_disabled() {
+  grep -A1 -xF 'stop' "${CAP}" | grep -qxF "$1"
+  grep -A1 -xF 'disable' "${CAP}" | grep -qxF "$1"
+}
+
+@test "typed teardown leaves the other instance intact and removes shared files after the last type" {
+  _seed_instances
+  rm "${ETC}/scaleset-listener.env" "${UNIT_DIR}/scaleset-listener.service" \
+    "${STUB_STATE}/scaleset-listener.service.started" "${STUB_STATE}/scaleset-listener.service.enabled"
+  cp "${ETC}/gpu.env" "${WORK}/gpu.before"
+  run _teardown_run --type cpu
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener@cpu.service
+  [ ! -e "${ETC}/cpu.env" ]
+  [ ! -e "${PREFIX}/runners/cpu" ]
+  cmp "${WORK}/gpu.before" "${ETC}/gpu.env"
+  [ -d "${PREFIX}/runners/gpu/work" ]
+  [ -f "${PREFIX}/bin/scaleset-listener" ]
+  [ -f "${UNIT_DIR}/scaleset-listener@.service" ]
+  ! grep -qxF 'scaleset-listener@gpu.service' "${CAP}" || false
+
+  : > "${CAP}"
+  run _teardown_run --type gpu
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener@gpu.service
+  grep -qxF 'daemon-reload' "${CAP}"
+  [ ! -e "${ETC}/gpu.env" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener@.service" ]
+  [ ! -e "${PREFIX}" ]
+}
+
+@test "whole-host teardown removes all instances together with legacy and shared files" {
+  _seed_instances
+  run _teardown_run
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener.service
+  _assert_unit_stopped_and_disabled scaleset-listener@cpu.service
+  _assert_unit_stopped_and_disabled scaleset-listener@gpu.service
+  grep -qxF 'daemon-reload' "${CAP}"
+  [ ! -e "${PREFIX}" ]
+  [ ! -e "${ETC}/cpu.env" ]
+  [ ! -e "${ETC}/gpu.env" ]
+  [ ! -e "${ETC}/scaleset-listener.env" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener@.service" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener.service" ]
+}
+
+@test "typed teardown rejects unsafe and reserved names before touching the host" {
+  _seed_instances
+  local name
+  for name in ../gpu work history; do
+    run _teardown_run --type "${name}"
+    [ "${status}" -eq 1 ]
+    [[ "${output}" == *"FAIL"* && "${output}" == *"${name}"* ]]
+    [ ! -s "${CAP}" ]
+    [ -d "${PREFIX}/runners/gpu/work" ]
+    [ -d "${PREFIX}/runners/cpu/work" ]
+    [ -f "${ETC}/cpu.env" ]
+    [ -f "${ETC}/gpu.env" ]
+    [ -f "${ETC}/scaleset-listener.env" ]
+    [ -f "${UNIT_DIR}/scaleset-listener@.service" ]
+    [ -f "${UNIT_DIR}/scaleset-listener.service" ]
+  done
+}
+
+@test "typed teardown keeps shared files for a legacy listener and removes it only for its type" {
+  _seed_instances
+  printf 'RUNNER_TYPE=gpu\n' >> "${ETC}/scaleset-listener.env"
+  # CPU is the only template instance left, but the legacy GPU unit still runs.
+  rm "${ETC}/gpu.env" "${STUB_STATE}/scaleset-listener@gpu.service.started" \
+    "${STUB_STATE}/scaleset-listener@gpu.service.enabled"
+
+  run _teardown_run --type cpu
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener@cpu.service
+  [ -f "${ETC}/scaleset-listener.env" ]
+  [ -f "${UNIT_DIR}/scaleset-listener.service" ]
+  [ -f "${UNIT_DIR}/scaleset-listener@.service" ]
+  [ -d "${PREFIX}" ]
+  ! grep -qxF 'scaleset-listener.service' "${CAP}" || false
+
+  : > "${CAP}"
+  run _teardown_run --type gpu
+  [ "${status}" -eq 0 ]
+  _assert_unit_stopped_and_disabled scaleset-listener.service
+  [ ! -e "${ETC}/scaleset-listener.env" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener.service" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener@.service" ]
+  [ ! -e "${PREFIX}" ]
 }
