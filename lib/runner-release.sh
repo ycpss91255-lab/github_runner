@@ -14,12 +14,12 @@
 # one-size ensure-cached.
 # shellcheck shell=bash
 
-# Static fallback used when dynamic resolution fails (offline, gh missing /
-# unauthenticated, GitHub rate-limited). Bump opportunistically when fresh
-# installs in those degraded states should not start months behind. GitHub
-# self-hosted runners always self-update on connect, so this is only the
-# bootstrap version, not the runtime one. Refs #10.
-readonly RUNNER_VERSION_FALLBACK="2.334.0"
+# Static fallback when dynamic resolution fails (offline, gh missing or
+# unauthenticated, or GitHub rate-limited). Keep this version in step with
+# the version comment and CPU image digest in deploy/runner-types.sample.yaml.
+# Self-hosted runners normally update automatically. Ephemeral JIT containers
+# run with auto-update off, so stale images eventually stop receiving jobs.
+readonly RUNNER_VERSION_FALLBACK="2.338.2"
 
 # Resolve the actions/runner version to download:
 #   1. If $RUNNER_VERSION is set, honour it verbatim (caller knows best).
@@ -28,7 +28,7 @@ readonly RUNNER_VERSION_FALLBACK="2.334.0"
 #      response is empty for any other reason, fall back to
 #      $RUNNER_VERSION_FALLBACK.
 #
-# Output: bare version string (no leading 'v'), e.g. "2.334.0".
+# Output: bare version string (no leading 'v'), e.g. "2.338.2".
 resolve_runner_version() {
   if [[ -n "${RUNNER_VERSION:-}" ]]; then
     echo "${RUNNER_VERSION}"
