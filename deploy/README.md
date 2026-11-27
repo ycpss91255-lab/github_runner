@@ -214,8 +214,10 @@ sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --type cp
 journalctl -u scaleset-listener@gpu.service -f
 ```
 
-The deploy command installs `scaleset-listener@.service` once and enables
-`scaleset-listener@<type>.service` for each deployed type. It creates the token
+The deploy command installs the shared `scaleset-listener@.service` template
+and enables `scaleset-listener@<type>.service` for each deployed type. When
+deploy replaces the template, it reloads systemd and restarts all active
+instances that use it. It creates the token
 file `/etc/github-runner-listener/<type>.env` at mode 0600 and sets
 `RUNNER_TYPE`, `RUNNER_HOME`, and `RUNNER_MANAGED_BY`. Each instance can
 write to its own `/opt/github-runner-listener/runners/<type>` tree, with jobs
@@ -228,7 +230,8 @@ that share a container engine. All types sharing a template use the same
 
 Pass `--type` when the config defines multiple types. With a single entry,
 deploy resolves its name through `scaleset-admin show`. Type names must match
-`^[a-z0-9][a-z0-9_-]{0,62}$`. The names `work` and `history` are reserved.
+`^[a-z0-9][a-z0-9_-]{0,62}$`. The names `work`, `history` and
+`scaleset-listener` are reserved.
 
 To remove just the CPU instance, preview and then confirm the local teardown.
 
@@ -240,7 +243,8 @@ sudo ./script/teardown-listener.sh --type cpu
 Typed teardown also removes the generated `runner-types-<type>.yaml` for that
 type, if present. The template and shared installation stay in place while
 another instance or the legacy unit remains. Omit `--type` to remove all
-listeners from the host. The scale sets on GitHub remain available to other hosts.
+listeners and generated per-type configs from the host. The scale sets on
+GitHub remain available to other hosts.
 
 > **Live GPU validation is HITL.** The config, its loading, and auto-concurrency
 > from the GPU count are exercised AFK (the detector is stubbed in the Go tests).
@@ -262,8 +266,14 @@ note on stderr. Fix the reported error and rerun deploy with the same options.
 Deploy identifies the legacy type from `RUNNER_TYPE`, or from the only
 configured type if that setting is empty. If you deploy another type first,
 the legacy unit keeps serving its current type until you deploy that type.
-Migration leaves `/opt/github-runner-listener/runners/work` in place. The
-legacy unit has up to 120 seconds (`TimeoutStopSec`) to drain. Legacy job
+Migration leaves `/opt/github-runner-listener/runners/work` in place.
+The legacy history ledger stays at `<prefix>/runners/history`. To carry it
+forward before migration, stop the legacy unit, create
+`<prefix>/runners/<type>` if needed, and move the ledger to
+`<prefix>/runners/<type>/history`. To move it afterward, stop the per-type
+instance first and preserve any history it has already written.
+
+The legacy unit has up to 120 seconds (`TimeoutStopSec`) to drain. Legacy job
 containers that outlast the drain keep their original `managed-by` label
 (`github-runner-listener` by default). The new instance's startup and
 periodic sweeps only select its configured label, so containers with a

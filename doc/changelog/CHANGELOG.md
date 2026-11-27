@@ -18,6 +18,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that previously set `RUNNER_TYPE` to select a type must pass `--type`.
   `script/teardown-listener.sh --type <name>` removes one instance and its
   generated config while keeping the shared installation for other listeners.
+  Whole-host teardown removes all generated per-type configs. Replacing the
+  shared template restarts the other active listener instances after systemd
+  reloads it. The names `work`, `history` and `scaleset-listener` are reserved
+  to protect legacy state paths and the legacy environment file. The migration
+  guide explains how to retain the legacy history ledger.
 
 - **CI builds and publishes the self-built runner images to ghcr.io.** The new
   `runner images` workflow builds `ghcr.io/ycpss91255-lab/runner-base` and

@@ -110,7 +110,7 @@ main() {
 
   local remove_legacy=1 remove_shared=1 env_file type unit reload=0
   local legacy_type="" type_config
-  local -a env_files=() units=()
+  local -a env_files=() units=() type_configs=()
   if (( TYPE_GIVEN )); then
     listener_type_paths "${TYPE_NAME}"
     # A symlink at either parent would send a per-type rm outside the state tree.
@@ -121,7 +121,7 @@ main() {
     env_files+=("${LISTENER_ENV_FILE}")
     units+=("${LISTENER_UNIT_NAME}")
     remove_legacy=0
-    type_config="${LISTENER_ETC}/runner-types-${LISTENER_TYPE}.yaml"
+    type_configs+=("${LISTENER_ETC}/runner-types-${LISTENER_TYPE}.yaml")
     if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]]; then
       if [[ -z ${SCALESET_ADMIN_BIN:-} && -x ${LISTENER_ADMIN_BIN} ]]; then
         SCALESET_ADMIN_BIN=${LISTENER_ADMIN_BIN}
@@ -133,6 +133,11 @@ main() {
     elif [[ -f ${LISTENER_LEGACY_ENV_FILE} || -e ${LISTENER_LEGACY_UNIT_PATH} || -L ${LISTENER_LEGACY_UNIT_PATH} ]]; then
       remove_shared=0
     fi
+  else
+    for type_config in "${LISTENER_ETC}"/runner-types-*.yaml; do
+      [[ -f ${type_config} || -L ${type_config} ]] || continue
+      type_configs+=("${type_config}")
+    done
   fi
 
   # Environment files are the inventory. Even an env file with an unexpected
@@ -165,8 +170,10 @@ main() {
   if (( remove_legacy )); then
     echo "  Remove unit:      ${LISTENER_LEGACY_UNIT_PATH}"
   fi
-  if (( TYPE_GIVEN )); then
+  for type_config in "${type_configs[@]}"; do
     echo "  Remove config:    ${type_config}"
+  done
+  if (( TYPE_GIVEN )); then
     echo "  Remove state:     ${LISTENER_RUNNER_HOME}"
   fi
   if (( remove_shared )); then
@@ -207,11 +214,13 @@ main() {
       echo "  removed env file: ${env_file}"
     fi
   done
-  if (( TYPE_GIVEN )); then
-    if [[ -e ${type_config} || -L ${type_config} ]]; then
+  for type_config in "${type_configs[@]}"; do
+    if [[ -f ${type_config} || -L ${type_config} ]]; then
       rm -- "${type_config}"
       echo "  removed config:   ${type_config}"
     fi
+  done
+  if (( TYPE_GIVEN )); then
     rm -rf -- "${LISTENER_RUNNER_HOME}"
     echo "  removed state:    ${LISTENER_RUNNER_HOME}"
   fi

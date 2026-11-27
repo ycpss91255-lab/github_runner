@@ -86,14 +86,15 @@ listener_deploy_paths() {
 
 # The name becomes both a path component and a systemd instance identifier.
 # The legacy state tree already uses work and history directly under runners.
+# The legacy environment file already uses scaleset-listener.env.
 listener_valid_type_name() {
   local LC_ALL=C
-  [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ && $1 != work && $1 != history ]]
+  [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ && $1 != work && $1 != history && $1 != scaleset-listener ]]
 }
 
 listener_type_paths() {
   if ! listener_valid_type_name "$1"; then
-    printf "FAIL: invalid runner type '%s': expected ^[a-z0-9][a-z0-9_-]{0,62}$ (work and history are reserved)\n" "$1" >&2
+    printf "FAIL: invalid runner type '%s': expected ^[a-z0-9][a-z0-9_-]{0,62}$ (work, history and scaleset-listener are reserved)\n" "$1" >&2
     return 1
   fi
   LISTENER_TYPE=$1
@@ -445,7 +446,7 @@ listener_install_unit() {
 }
 
 listener_deploy_template() (
-  local src=$1 user=$2 rendered prefix etc
+  local src=$1 user=$2 rendered prefix etc replacing=0 active_units unit
   rendered=$(mktemp)
   trap 'rm -f -- "${rendered}"' EXIT
 
@@ -461,7 +462,16 @@ listener_deploy_template() (
   if listener_unit_current "${rendered}" "${LISTENER_UNIT_PATH}"; then
     echo "  systemd unit:     ${LISTENER_UNIT_PATH} already current, skipped"
   else
+    [[ ! -f ${LISTENER_UNIT_PATH} ]] || replacing=1
     listener_install_unit "${rendered}" "${LISTENER_UNIT_PATH}"
+    if (( replacing )); then
+      active_units=$(_systemctl list-units --type=service --state=active --no-legend --plain --full --no-pager 'scaleset-listener@*.service')
+      while read -r unit _; do
+        [[ ${unit} == scaleset-listener@?*.service && ${unit} != "${LISTENER_UNIT_NAME}" ]] || continue
+        _systemctl restart "${unit}"
+        echo "  restarted:        ${unit} (shared template changed)"
+      done <<< "${active_units}"
+    fi
   fi
 )
 
