@@ -169,6 +169,7 @@ _assert_unit_stopped_and_disabled() {
 
 @test "whole-host teardown removes all instances together with legacy and shared files" {
   _seed_instances
+  touch "${ETC}/runner-types-cpu.yaml" "${ETC}/runner-types-gpu.yaml"
   run _teardown_run
   [ "${status}" -eq 0 ]
   _assert_unit_stopped_and_disabled scaleset-listener.service
@@ -181,12 +182,14 @@ _assert_unit_stopped_and_disabled() {
   [ ! -e "${ETC}/scaleset-listener.env" ]
   [ ! -e "${UNIT_DIR}/scaleset-listener@.service" ]
   [ ! -e "${UNIT_DIR}/scaleset-listener.service" ]
+  [ ! -e "${ETC}/runner-types-cpu.yaml" ]
+  [ ! -e "${ETC}/runner-types-gpu.yaml" ]
 }
 
 @test "typed teardown rejects unsafe and reserved names before touching the host" {
   _seed_instances
   local name
-  for name in ../gpu work history; do
+  for name in ../gpu work history scaleset-listener; do
     run _teardown_run --type "${name}"
     [ "${status}" -eq 1 ]
     [[ "${output}" == *"FAIL"* && "${output}" == *"${name}"* ]]

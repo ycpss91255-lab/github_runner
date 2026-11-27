@@ -79,6 +79,13 @@ exec \"${real_install}\" \"\$@\""
   # a systemd that behaves like nothing else.
   _mkstub systemctl '
 case "$1" in
+  list-units)
+    for state in "${STUB_STATE}"/scaleset-listener@*.service.started; do
+      [ -f "$state" ] || continue
+      unit=${state##*/}
+      printf "%s loaded active running Listener\n" "${unit%.started}"
+    done
+    exit 0 ;;
   is-active)
     { [ "${STUB_UNIT_ACTIVE}" = 1 ] || [ -e "${STUB_STATE}/$2.started" ]; } \
       && { echo active; exit 0; }
@@ -192,13 +199,12 @@ _deploy_host() {
 
 _systemctl_called() {
   awk -v verb="$1" -v unit="${2-}" '
-    $0 == "name=systemctl" {
-      getline
-      if ($0 == verb) {
-        if (unit == "") found = 1
-        else { getline; if ($0 == unit) found = 1 }
-      }
+    /^name=/ {
+      matching = ($0 == "name=systemctl" && (getline) > 0 && $0 == verb)
+      if (matching && unit == "") found = 1
+      next
     }
+    matching && $0 == unit { found = 1 }
     END { exit !found }
   ' "${CAP}"
 }
@@ -351,6 +357,7 @@ EOF
 @test "redeploy skips the current template, backfills missing runner settings and restarts the instance" {
   run _deploy
   [ "${status}" -eq 0 ]
+  touch "${STUB_STATE}/scaleset-listener@cpu.service.started"
   sed -i '/^RUNNER_HOME=/d; /^RUNNER_MANAGED_BY=/d' "${ETC}/gpu.env"
   export STUB_USER_EXISTS=1 STUB_UNIT_ENABLED=1 STUB_UNIT_ACTIVE=1 STUB_SCALE_SET_EXISTS=1
   : > "${CAP}"
@@ -362,7 +369,22 @@ EOF
   grep -qxF 'GITHUB_TOKEN=tok-abc123' "${ETC}/gpu.env"
   ! grep -qxF "${LISTENER_UNIT_DIR}/scaleset-listener@.service" "${CAP}" || false
   _systemctl_called restart scaleset-listener@gpu.service
+  ! _systemctl_called restart scaleset-listener@cpu.service || false
   grep -qxF 'RUNNER_MANAGED_BY=github-runner-listener-gpu' "${ETC}/gpu.env"
+}
+
+@test "redeploy restarts other active instances after replacing the shared template" {
+  run _deploy --skip-github
+  [ "${status}" -eq 0 ]
+  touch "${STUB_STATE}/scaleset-listener@cpu.service.started"
+  printf '\n# Older installed template\n' >> "${LISTENER_UNIT_DIR}/scaleset-listener@.service"
+  : > "${CAP}"
+
+  run _deploy_host --type gpu --skip-github </dev/null
+  [ "${status}" -eq 0 ]
+  _systemctl_called daemon-reload
+  _systemctl_called restart scaleset-listener@gpu.service
+  _systemctl_called restart scaleset-listener@cpu.service
 }
 
 @test "redeploy keeps an explicit RUNNER_MANAGED_BY without appending an override" {
@@ -595,6 +617,21 @@ YAML
   [ "${status}" -eq 1 ]
   [[ "${output}" == *"FAIL"* && "${output}" == *"GPU"* ]]
   ! grep -qxE 'install-listener|name=install|name=systemctl' "${CAP}" || false
+  [ ! -e "${PREFIX}" ]
+  [ ! -e "${ETC}" ]
+  [ ! -e "${LISTENER_UNIT_DIR}" ]
+}
+
+@test "deploy rejects scaleset-listener as reserved before touching the host" {
+  run _deploy_host --type scaleset-listener --skip-github <<< 'tok-abc123'
+  [ "${status}" -eq 1 ]
+  local diagnostic
+  diagnostic=$(grep -F 'FAIL:' <<< "${output}")
+  [[ "${diagnostic}" == *"scaleset-listener"* ]]
+  diagnostic=${diagnostic#*"scaleset-listener"}
+  [[ "${diagnostic}" == *work* && "${diagnostic}" == *history* &&
+     "${diagnostic}" == *scaleset-listener* && "${diagnostic}" == *reserved* ]]
+  [ ! -s "${CAP}" ]
   [ ! -e "${PREFIX}" ]
   [ ! -e "${ETC}" ]
   [ ! -e "${LISTENER_UNIT_DIR}" ]

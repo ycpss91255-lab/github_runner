@@ -1033,7 +1033,7 @@ teardown() { rm -rf "${WORK}"; }
 @test "listener_valid_type_name rejects unsafe and reserved type names" {
   local name too_long
   printf -v too_long 'g%063d' 0
-  for name in '' ../x a/b GPU work history -x _x 'two words' "${too_long}"; do
+  for name in '' ../x a/b GPU work history scaleset-listener -x _x 'two words' "${too_long}"; do
     run bash -c 'source "$1"; declare -F listener_valid_type_name >/dev/null || exit 2; listener_valid_type_name "$2"' _ "${LIB}" "${name}"
     [ "${status}" -eq 1 ]
   done
