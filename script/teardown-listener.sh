@@ -30,14 +30,16 @@ source "${SCRIPT_DIR}/../lib/listener-deploy.sh"
 LISTENER_YES=0
 DRY_RUN=0
 KEEP_USER=1
+TYPE_NAME=""
+TYPE_GIVEN=0
 
 usage() {
   cat <<EOF
 Usage: $(basename "$0") [options]
 
-Remove the scale-set listener from THIS machine: stop and disable the unit,
-remove it, remove the environment file (which holds the token) and the install
-prefix. Idempotent -- anything already gone is skipped.
+Remove scale-set listeners from THIS machine. Stop and disable each selected
+unit and remove its environment file and runner state. The last removal also
+removes the shared template and install prefix. Already absent files are skipped.
 
 It does NOT delete the scale set on GitHub. That is shared by every machine
 serving the runner type, so removing one host must not stop serving the rest.
@@ -46,6 +48,7 @@ Delete it deliberately, when you actually mean to retire the runner type:
     scaleset-admin delete --config <path> --type <name> --yes
 
 Options:
+  --type <name>     remove one type (default: remove all listeners)
   --prefix <path>   install prefix to remove (default: /opt/github-runner-listener)
   --etc <path>      config dir holding the environment file
                     (default: /etc/github-runner-listener)
@@ -69,6 +72,7 @@ SERVICE_USER=""
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case $1 in
+      --type)        TYPE_NAME=${2-}; TYPE_GIVEN=1; shift; if (( $# )); then shift; fi ;;
       --prefix)      LISTENER_PREFIX=${2:?--prefix needs a value}; shift 2 ;;
       --etc)         LISTENER_ETC=${2:?--etc needs a value}; shift 2 ;;
       --unit-dir)    LISTENER_UNIT_DIR=${2:?--unit-dir needs a value}; shift 2 ;;
@@ -88,12 +92,14 @@ parse_args() {
 assert_removable_prefix() {
   local dir=$1
   [[ ${dir} = /* ]] || { echo "FAIL: --prefix must be absolute: '${dir}'" >&2; exit 1; }
-  case "${dir%/}" in
-    ""|/|/etc|/usr|/var|/home|/opt|/root|"${HOME:-}")
-      echo "FAIL: refusing to remove '${dir}'" >&2; exit 1 ;;
-  esac
   case "/${dir}/" in
     */../*) echo "FAIL: --prefix must be normalized (no '..'): '${dir}'" >&2; exit 1 ;;
+  esac
+  # Collapse redundant slashes and dot components before checking broad roots.
+  LISTENER_PREFIX=$(realpath -ms -- "${dir}")
+  case "${LISTENER_PREFIX}" in
+    /|/etc|/usr|/var|/home|/opt|/root|"${HOME:-}")
+      echo "FAIL: refusing to remove '${dir}'" >&2; exit 1 ;;
   esac
 }
 
@@ -102,11 +108,66 @@ main() {
   listener_deploy_paths
   assert_removable_prefix "${LISTENER_PREFIX}"
 
+  local remove_legacy=1 remove_shared=1 env_file type unit reload=0
+  local -a env_files=() units=()
+  if (( TYPE_GIVEN )); then
+    listener_type_paths "${TYPE_NAME}"
+    # A symlink at either parent would send a per-type rm outside the state tree.
+    if [[ -L ${LISTENER_PREFIX} || -L ${LISTENER_PREFIX}/runners ]]; then
+      echo "FAIL: refusing to remove a runner tree through a symlink" >&2
+      exit 1
+    fi
+    env_files+=("${LISTENER_ENV_FILE}")
+    units+=("${LISTENER_UNIT_NAME}")
+    remove_legacy=0
+    if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]] &&
+      [[ $(listener_env_value "${LISTENER_LEGACY_ENV_FILE}" RUNNER_TYPE) == "${LISTENER_TYPE}" ]]; then
+      remove_legacy=1
+    elif [[ -e ${LISTENER_LEGACY_UNIT_PATH} || -L ${LISTENER_LEGACY_UNIT_PATH} ]]; then
+      remove_shared=0
+    fi
+  fi
+
+  # Environment files are the inventory. Even an env file with an unexpected
+  # name keeps shared files in place during a typed teardown.
+  for env_file in "${LISTENER_ETC}"/*.env; do
+    [[ -f ${env_file} && ${env_file} != "${LISTENER_LEGACY_ENV_FILE}" ]] || continue
+    if (( TYPE_GIVEN )); then
+      [[ ${env_file} == "${LISTENER_ENV_FILE}" ]] || remove_shared=0
+    else
+      env_files+=("${env_file}")
+      type=${env_file##*/}
+      type=${type%.env}
+      if listener_valid_type_name "${type}"; then
+        units+=("scaleset-listener@${type}.service")
+      fi
+    fi
+  done
+  if (( remove_legacy )); then
+    units+=("${LISTENER_LEGACY_UNIT_NAME}")
+    env_files+=("${LISTENER_LEGACY_ENV_FILE}")
+  fi
+
   echo "Plan:"
-  echo "  Stop + disable:   ${LISTENER_UNIT_NAME}"
-  echo "  Remove unit:      ${LISTENER_UNIT_PATH}"
-  echo "  Remove env file:  ${LISTENER_ENV_FILE}   (holds the admin token)"
-  echo "  Remove prefix:    ${LISTENER_PREFIX}"
+  for unit in "${units[@]}"; do
+    echo "  Stop + disable:   ${unit}"
+  done
+  for env_file in "${env_files[@]}"; do
+    echo "  Remove env file:  ${env_file}   (holds the admin token)"
+  done
+  if (( remove_legacy )); then
+    echo "  Remove unit:      ${LISTENER_LEGACY_UNIT_PATH}"
+  fi
+  if (( TYPE_GIVEN )); then
+    echo "  Remove state:     ${LISTENER_RUNNER_HOME}"
+  fi
+  if (( remove_shared )); then
+    echo "  Remove template:  ${LISTENER_UNIT_PATH}"
+    echo "  Remove prefix:    ${LISTENER_PREFIX}"
+  else
+    # A remaining instance may still need the service account.
+    KEEP_USER=1
+  fi
   if (( KEEP_USER )); then
     echo "  Service user:     left in place"
   else
@@ -124,40 +185,39 @@ main() {
 
   listener_confirm "Proceed? [y/N] "
 
-  if listener_unit_active "${LISTENER_UNIT_NAME}"; then
-    _systemctl stop "${LISTENER_UNIT_NAME}"
-    echo "  stopped:          ${LISTENER_UNIT_NAME}"
-  else
-    echo "  stop:             ${LISTENER_UNIT_NAME} was not running, skipped"
+  for unit in "${units[@]}"; do
+    listener_stop_disable_unit "${unit}"
+  done
+  if (( remove_legacy )) && [[ -e ${LISTENER_LEGACY_UNIT_PATH} || -L ${LISTENER_LEGACY_UNIT_PATH} ]]; then
+    rm -- "${LISTENER_LEGACY_UNIT_PATH}"
+    echo "  removed unit:     ${LISTENER_LEGACY_UNIT_PATH}"
+    reload=1
   fi
-
-  if listener_unit_enabled "${LISTENER_UNIT_NAME}"; then
-    _systemctl disable "${LISTENER_UNIT_NAME}" >/dev/null 2>&1 || true
-    echo "  disabled:         ${LISTENER_UNIT_NAME}"
-  else
-    echo "  disable:          ${LISTENER_UNIT_NAME} was not enabled, skipped"
+  for env_file in "${env_files[@]}"; do
+    if [[ -e ${env_file} || -L ${env_file} ]]; then
+      rm -- "${env_file}"
+      echo "  removed env file: ${env_file}"
+    fi
+  done
+  if (( TYPE_GIVEN )); then
+    rm -rf -- "${LISTENER_RUNNER_HOME}"
+    echo "  removed state:    ${LISTENER_RUNNER_HOME}"
   fi
-
-  if [[ -f ${LISTENER_UNIT_PATH} ]]; then
-    rm -f "${LISTENER_UNIT_PATH}"
+  if (( remove_shared )); then
+    if [[ -e ${LISTENER_UNIT_PATH} || -L ${LISTENER_UNIT_PATH} ]]; then
+      rm -- "${LISTENER_UNIT_PATH}"
+      echo "  removed template: ${LISTENER_UNIT_PATH}"
+      reload=1
+    fi
+    if [[ -d ${LISTENER_PREFIX} ]]; then
+      rm -rf -- "${LISTENER_PREFIX}"
+      echo "  removed prefix:   ${LISTENER_PREFIX}"
+    else
+      echo "  prefix:           already absent, skipped"
+    fi
+  fi
+  if (( reload )); then
     _systemctl daemon-reload
-    echo "  removed unit:     ${LISTENER_UNIT_PATH}"
-  else
-    echo "  unit:             already absent, skipped"
-  fi
-
-  if [[ -f ${LISTENER_ENV_FILE} ]]; then
-    rm -f "${LISTENER_ENV_FILE}"
-    echo "  removed env file: ${LISTENER_ENV_FILE}"
-  else
-    echo "  env file:         already absent, skipped"
-  fi
-
-  if [[ -d ${LISTENER_PREFIX} ]]; then
-    rm -rf "${LISTENER_PREFIX}"
-    echo "  removed prefix:   ${LISTENER_PREFIX}"
-  else
-    echo "  prefix:           already absent, skipped"
   fi
 
   if (( ! KEEP_USER )) && listener_service_user_exists "${SERVICE_USER}"; then
@@ -166,7 +226,11 @@ main() {
   fi
 
   echo
-  echo "This machine no longer serves the runner type."
+  if (( TYPE_GIVEN )); then
+    echo "Removed listener for ${LISTENER_TYPE}."
+  else
+    echo "Removed all listeners from this machine."
+  fi
   echo "The scale set on GitHub is untouched."
 }
 

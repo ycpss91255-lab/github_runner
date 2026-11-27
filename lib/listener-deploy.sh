@@ -71,20 +71,35 @@ _stdin_is_tty()   { [[ -t 0 ]]; }
 listener_deploy_paths() {
   LISTENER_PREFIX="${LISTENER_PREFIX:-/opt/github-runner-listener}"
   LISTENER_ETC="${LISTENER_ETC:-/etc/github-runner-listener}"
-  LISTENER_ENV_FILE="${LISTENER_ETC}/scaleset-listener.env"
-  LISTENER_UNIT_NAME="${LISTENER_UNIT_NAME:-scaleset-listener.service}"
-  # Overridable so a test can place the unit somewhere throwaway instead of the
-  # host's real systemd directory.
+  # Overridable so tests can install units without touching host systemd.
   LISTENER_UNIT_DIR="${LISTENER_UNIT_DIR:-/etc/systemd/system}"
-  LISTENER_UNIT_PATH="${LISTENER_UNIT_DIR}/${LISTENER_UNIT_NAME}"
+  LISTENER_TEMPLATE_UNIT_NAME=scaleset-listener@.service
+  LISTENER_UNIT_PATH="${LISTENER_UNIT_DIR}/${LISTENER_TEMPLATE_UNIT_NAME}"
+  LISTENER_LEGACY_ENV_FILE="${LISTENER_ETC}/scaleset-listener.env"
+  # The single-unit token checker uses the legacy file without selecting a type.
+  LISTENER_ENV_FILE=${LISTENER_LEGACY_ENV_FILE}
+  LISTENER_LEGACY_UNIT_NAME=scaleset-listener.service
+  LISTENER_LEGACY_UNIT_PATH="${LISTENER_UNIT_DIR}/${LISTENER_LEGACY_UNIT_NAME}"
   LISTENER_BIN="${LISTENER_PREFIX}/bin/scaleset-listener"
   LISTENER_ADMIN_BIN="${LISTENER_PREFIX}/bin/scaleset-admin"
-  # The runner state the listener WRITES at job time. provision-job.sh resolves
-  # RUNNER_HOME to <its dir>/../runners -- <prefix>/runners once installed --
-  # and creates each per-job dir under RUNNER_HOME/work (runner_work_root) and
-  # the history ledger under RUNNER_HOME/history. The unit's ReadWritePaths
-  # grants exactly LISTENER_RUNNER_HOME, so these two must name the same path.
-  LISTENER_RUNNER_HOME="${LISTENER_PREFIX}/runners"
+}
+
+# The name becomes both a path component and a systemd instance identifier.
+# The legacy state tree already uses work and history directly under runners.
+listener_valid_type_name() {
+  local LC_ALL=C
+  [[ $1 =~ ^[a-z0-9][a-z0-9_-]{0,62}$ && $1 != work && $1 != history ]]
+}
+
+listener_type_paths() {
+  if ! listener_valid_type_name "$1"; then
+    printf "FAIL: invalid runner type '%s': expected ^[a-z0-9][a-z0-9_-]{0,62}$ (work and history are reserved)\n" "$1" >&2
+    return 1
+  fi
+  LISTENER_TYPE=$1
+  LISTENER_ENV_FILE="${LISTENER_ETC}/${LISTENER_TYPE}.env"
+  LISTENER_UNIT_NAME="scaleset-listener@${LISTENER_TYPE}.service"
+  LISTENER_RUNNER_HOME="${LISTENER_PREFIX}/runners/${LISTENER_TYPE}"
   LISTENER_WORK_ROOT="${LISTENER_RUNNER_HOME}/work"
 }
 
@@ -284,19 +299,13 @@ listener_ensure_engine_access() {
 
 # --- the runner state tree ---------------------------------------------------
 
-# Create RUNNER_HOME and its work root, owned by the service user.
-#
-# The unit runs under ProtectSystem=strict, so the listener can write only what
-# ReadWritePaths grants (LISTENER_RUNNER_HOME). Granting a path is not enough on
-# its own: the directory must exist (systemd refuses to start a unit whose
-# ReadWritePaths is missing, which is the loud failure we want rather than a
-# silent read-only tree) and belong to the user the listener runs as. Only these
-# two directories are ensured, never recursively, so a re-run leaves whatever
-# the listener already wrote under them alone.
+# systemd requires the writable directory to exist before starting the unit.
+# Own the shared parent too so the service user can traverse it. Avoid
+# recursive ownership changes because jobs and other types already live here.
 listener_ensure_work_root() {
-  local user=$1
-  install -d -m 0750 "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
-  _chown "${user}:${user}" "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
+  local user=$1 parent="${LISTENER_PREFIX}/runners"
+  install -d -m 0750 "${parent}" "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
+  _chown "${user}:${user}" "${parent}" "${LISTENER_RUNNER_HOME}" "${LISTENER_WORK_ROOT}"
   echo "  work root:        ${LISTENER_WORK_ROOT} (owned by ${user})"
 }
 
@@ -309,6 +318,16 @@ listener_env_file_ready() {
   local file=$1
   [[ -f ${file} ]] || return 1
   [[ "$(stat -c '%a' "${file}" 2>/dev/null)" == 600 ]]
+}
+
+listener_secure_env_file() {
+  local file=$1 mode
+  mode=$(stat -c '%a' "${file}")
+  if [[ ${mode} != 600 ]]; then
+    printf 'WARNING: %s was mode %04d, not 0600. The token may have been exposed and should be rotated.\n' \
+      "${file}" "${mode}" >&2
+    chmod 0600 "${file}"
+  fi
 }
 
 # Read a single-line value without executing the EnvironmentFile as shell code.
@@ -337,6 +356,7 @@ listener_missing_env_defaults() {
     "GITHUB_CONFIG_URL=${config_url}" \
     "RUNNER_TYPES_CONFIG=${types_config}" \
     "RUNNER_TYPE=${type_name}" \
+    "RUNNER_HOME=${prefix}/runners/${type_name}" \
     "SCALE_SET_OWNER=${owner}" \
     "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" \
     "REAP_SCRIPT=${prefix}/listener/reap.sh" \
@@ -414,6 +434,19 @@ listener_install_unit() {
 
 listener_unit_enabled() { _systemctl is-enabled "$1" >/dev/null 2>&1; }
 listener_unit_active()  { _systemctl is-active  "$1" >/dev/null 2>&1; }
+
+# Retire the service before removing the files it needs to drain or restart.
+listener_stop_disable_unit() {
+  local unit=$1
+  if listener_unit_active "${unit}"; then
+    _systemctl stop "${unit}"
+    echo "  stopped:          ${unit}"
+  fi
+  if listener_unit_enabled "${unit}"; then
+    _systemctl disable "${unit}" >/dev/null
+    echo "  disabled:         ${unit}"
+  fi
+}
 
 listener_enable_unit() {
   local unit=$1
@@ -565,6 +598,7 @@ listener_show_field() {
   printf '%s\n' "${out}" | sed -n "s/^${key}=//p" | head -1
 }
 
+listener_config_name()    { listener_show_field "$1" "$2" name; }
 listener_config_labels()  { listener_show_field "$1" "$2" labels; }
 listener_config_scaleset(){ listener_show_field "$1" "$2" scale_set; }
 listener_config_image()   { listener_show_field "$1" "$2" image; }

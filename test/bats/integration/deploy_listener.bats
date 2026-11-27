@@ -620,6 +620,8 @@ YAML
 
 @test "deploy dry run previews legacy migration without changing the host" {
   _seed_legacy
+  # The fixture itself installs the legacy env file through the recording stub.
+  : > "${CAP}"
   cp -a "${ETC}" "${WORK}/etc.before"
   cp -a "${LISTENER_UNIT_DIR}" "${WORK}/units.before"
   cp -a "${PREFIX}" "${WORK}/prefix.before"
