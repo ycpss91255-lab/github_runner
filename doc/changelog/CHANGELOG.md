@@ -11,7 +11,7 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Runner types can opt into the host Docker socket.** Set `docker_socket`
   on a trusted type to let its jobs use the host Docker daemon for builds,
   runs, and Compose. This grants root-equivalent host access. The provisioner
-  adds the socket's host GID for the runner user and retains baseline
+  adds the socket target's host GID even for symlinked paths and retains baseline
   container hardening. Socket access defaults to off for every type.
 
 - **CI builds and publishes the self-built runner images to ghcr.io.** The new

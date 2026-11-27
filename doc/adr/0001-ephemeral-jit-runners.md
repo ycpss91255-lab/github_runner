@@ -2,7 +2,7 @@
 
 > Serves: Invariant 6 — Each container is responsible for exactly one thing
 
-- **Status**: Accepted
+- **Status**: Amended (2026-11-27, #116)
 - **Date**: 2026-06-23
 - **Note**: supersedes the persistent systemd-service runner model;
   implementation is phased. Revised after the security / system / code design
@@ -67,13 +67,15 @@ admission*.
 - **Security comes from the architecture, not from rootless.** The untrusted
   thing — the job — runs inside a throwaway container that, by default, does
   **not** receive the Docker socket. So the "runner in the `docker` group = host
-  root" exposure (#82) is **no longer reachable by job code**; the listener that
-  holds Docker access runs only our trusted code.
+  root" exposure (#82) is **no longer reachable by job code by default** (see
+  Amendment (#116)). The listener that holds Docker access runs only our
+  trusted code.
 - **Defense-in-depth on every job container**: `--cap-drop=ALL` (+ minimal
   add-back), `--security-opt no-new-privileges`, default seccomp kept, MAC
   (SELinux/AppArmor) kept **enforced** (no `label=disable`; use `:Z` relabel for
   mounts), `--pids-limit`, non-root in-container user where possible.
-- **DinD / image builds**: **never mount the host Docker socket** into a job.
+- **DinD / image builds**: Keep the host Docker socket unmounted by default
+  (see Amendment (#116)).
   Image builds use a daemonless rootless builder (**Kaniko / BuildKit-rootless /
   Buildah**). Jobs that genuinely need an inner daemon use **Sysbox** or rootless
   DinD-in-container.
@@ -95,6 +97,25 @@ config entry: `{ labels, image, device passthrough, runtime, build tool,
 hardening profile, auto-sized concurrency }`, mapping to **one GitHub scale set
 per type** (scale sets are homogeneous). Start with the GPU type; adding a type
 is a new config entry, not a code change.
+
+## Amendment (#116) — per-runner-type Docker socket opt-in
+
+On 2026-11-27, the owner decided that a runner type may opt in by setting a
+per-type `docker_socket:` path. Jobs on that type use the host Docker daemon
+for builds, runs, and Compose. This grants **root-equivalent host access**
+and reverses the original "never mount the host Docker socket" and "#82 no
+longer reachable by job code" decisions for opted-in types only. Socket access
+is off by default for every type and requires explicit configuration.
+
+The mount keeps `:Z` relabelling and baseline hardening stays in place
+(`--cap-drop=ALL`, `--security-opt no-new-privileges`, `--pids-limit`, and
+no `--privileged`). The provisioner adds `--group-add <host socket gid>` so
+the runner user can open the socket.
+
+The repository setting `approval_policy=all_external_contributors` gates
+untrusted fork PR code (ADR-0011 approval gate), so only approved fork PR code
+reaches an opted-in type. Opt in only for trusted runner types. Daemonless
+builders and Sysbox remain the recommended paths for types without the opt-in.
 
 ## Alternatives
 
@@ -122,7 +143,8 @@ is a new config entry, not a code change.
 - **Glossary changes** (CONTEXT.md): canonical terms — Ephemeral runner, JIT
   config, Scale set, Runner Scale Set Client, runner-type config.
 - **Advances** #80 (no long-lived token on host), #77 (residue eliminated), #82
-  (root-equivalence not reachable by job code; rootless evaluated and scoped).
+  (root-equivalence not reachable by job code by default, see Amendment (#116);
+  rootless evaluated and scoped).
 - **Forensic tension**: ephemeral destroys evidence on teardown → addressed by
   **ADR-0002** (job history captured before teardown).
 

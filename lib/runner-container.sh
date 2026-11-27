@@ -206,10 +206,11 @@ runner_container_run() {
   # opt-in (#116). Empty leaves the mount off. Access is root-equivalent on
   # the host. The mount keeps :Z relabelling, and --group-add lets the runner
   # user open the socket even if its image-local docker group has a different GID.
+  # Resolve the target's GID because the bind mount follows symlinks.
   local -a socket_args=()
   local socket_gid
   if [[ -n "${RUNNER_DOCKER_SOCKET}" ]]; then
-    if ! socket_gid=$(stat -c %g "${RUNNER_DOCKER_SOCKET}" 2>/dev/null) || [[ ! ${socket_gid} =~ ^[0-9]+$ ]]; then
+    if ! socket_gid=$(stat -L -c %g "${RUNNER_DOCKER_SOCKET}" 2>/dev/null) || [[ ! ${socket_gid} =~ ^[0-9]+$ ]]; then
       printf 'FAIL: cannot resolve group ID for Docker socket %s\n' "${RUNNER_DOCKER_SOCKET}" >&2
       return 1
     fi
