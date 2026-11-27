@@ -24,6 +24,13 @@ setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   LIB="${ROOT}/lib/listener-deploy.sh"
   WORK=$(mktemp -d)
+  mkdir -p "${WORK}/stub"
+  cat > "${WORK}/stub/hostname" <<'EOF'
+#!/bin/bash
+printf '%s\n' "${STUB_HOSTNAME-host-a}"
+EOF
+  chmod +x "${WORK}/stub/hostname"
+  export PATH="${WORK}/stub:${PATH}"
 }
 
 teardown() { rm -rf "${WORK}"; }
@@ -231,6 +238,22 @@ teardown() { rm -rf "${WORK}"; }
   grep -qx 'GITHUB_CONFIG_URL=https://github.com/acme' "${WORK}/etc/listener.env"
   grep -qx 'RUNNER_TYPES_CONFIG=/etc/x/runner-types.yaml' "${WORK}/etc/listener.env"
   grep -qx 'RUNNER_TYPE=gpu' "${WORK}/etc/listener.env"
+}
+
+@test "listener_write_env_file sets the hostname owner and installed script paths" {
+  local file="${WORK}/etc/listener.env" prefix="${WORK}/opt"
+  run bash -c '
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    LISTENER_PREFIX=$3
+    listener_write_env_file "$2" https://github.com/acme /etc/x/runner-types.yaml gpu
+  ' _ "${LIB}" "${file}" "${prefix}"
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c '%a' "${file}")" = 600 ]
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
+  grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
+  grep -qxF "REAP_SCRIPT=${prefix}/listener/reap.sh" "${file}"
+  grep -qxF "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh" "${file}"
 }
 
 @test "listener_write_env_file never prints the token" {
@@ -835,4 +858,145 @@ teardown() { rm -rf "${WORK}"; }
   run bash -c "source '${LIB}'; listener_config_url_scope https://github.com/a/b/c"
   [[ "${output}" != *"organisation"* ]]
   [[ "${output}" != *"repository"* ]]
+}
+
+@test "listener_backfill_env_file fills empty derived settings and preserves explicit values" {
+  local file="${WORK}/listener.env" prefix="${WORK}/opt"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/my-org' \
+    'SCALE_SET_OWNER=' 'RUNNER_TYPE=' 'PROVISION_SCRIPT=' \
+    'REAP_SCRIPT=/custom/reap.sh' > "${file}"
+
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_PREFIX=$3
+    listener_backfill_env_file "$2" https://github.com/my-org /c.yaml gpu
+  ' _ "${LIB}" "${file}" "${prefix}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'REAP_SCRIPT=/custom/reap.sh' "${file}"
+  grep -qxF 'GITHUB_CONFIG_URL=https://github.com/my-org' "${file}"
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
+  grep -qxF 'RUNNER_TYPE=gpu' "${file}"
+  grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
+}
+
+@test "listener_backfill_env_file replaces relative script paths once and preserves absolute paths" {
+  local file="${WORK}/listener.env" prefix="${WORK}/opt"
+  local preserved key failed=0
+  local -A scripts=(
+    [PROVISION_SCRIPT]=provision-job.sh
+    [REAP_SCRIPT]=reap.sh
+    [HOST_PROBE_CMD]=host-probe.sh
+  )
+
+  for preserved in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+    install -m 0600 /dev/null "${file}"
+    printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/acme' 'RUNNER_TYPES_CONFIG=/c.yaml' \
+      'RUNNER_TYPE=gpu' 'SCALE_SET_OWNER=host-a' > "${file}"
+    for key in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+      if [[ ${key} == "${preserved}" ]]; then
+        printf '%s=/custom/%s\n' "${key}" "${scripts[$key]}" >> "${file}"
+      else
+        printf '%s=%s\n' "${key}" "${scripts[$key]}" >> "${file}"
+      fi
+    done
+    cp "${file}" "${file}.before"
+
+    run bash -c '
+      set -e
+      source "$1"
+      LISTENER_PREFIX=$3
+      listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+    ' _ "${LIB}" "${file}" "${prefix}"
+    [ "${status}" -eq 0 ]
+
+    # Backfill leaves the original lines in place and appends an override.
+    head -n "$(wc -l < "${file}.before")" "${file}" | diff -u "${file}.before" - || failed=1
+    for key in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+      if [[ ${key} == "${preserved}" ]]; then
+        [ "$(grep -c "^${key}=" "${file}")" -eq 1 ] || failed=1
+      else
+        local expected="${key}=${prefix}/listener/${scripts[$key]}"
+        local actual
+        actual=$(sed -n "/^${key}=/p" "${file}" | tail -n 1)
+        if [[ ${actual} != "${expected}" ]]; then
+          printf 'Last assignment was %s, expected %s\n' "${actual}" "${expected}" >&2
+          failed=1
+        fi
+        [ "$(grep -c "^${key}=" "${file}")" -eq 2 ] || failed=1
+      fi
+    done
+
+    cp "${file}" "${file}.once"
+    run bash -c '
+      set -e
+      source "$1"
+      LISTENER_PREFIX=$3
+      listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+    ' _ "${LIB}" "${file}" "${prefix}"
+    [ "${status}" -eq 0 ]
+    diff -u "${file}.once" "${file}" || failed=1
+  done
+  [ "${failed}" -eq 0 ]
+}
+
+@test "listener_backfill_env_file uses the hostname with an ownerless config URL" {
+  local file="${WORK}/listener.env"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com' > "${file}"
+
+  run bash -c '
+    set -e
+    source "$1"
+    listener_backfill_env_file "$2" https://github.com /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
+}
+
+@test "listener_write_env_file uses the hostname with an ownerless config URL" {
+  local file="${WORK}/listener.env"
+
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    listener_write_env_file "$2" https://github.com /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'SCALE_SET_OWNER=host-a' "${file}"
+}
+
+@test "listener_backfill_env_file rejects an empty hostname" {
+  local file="${WORK}/listener.env"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/acme' > "${file}"
+
+  export STUB_HOSTNAME=''
+  run bash -c '
+    set -e
+    source "$1"
+    listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *SCALE_SET_OWNER* ]]
+  ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+}
+
+@test "listener_write_env_file rejects an empty hostname" {
+  local file="${WORK}/listener.env"
+
+  export STUB_HOSTNAME=''
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    listener_write_env_file "$2" https://github.com/acme /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *SCALE_SET_OWNER* ]]
+  if [[ -f ${file} ]]; then
+    ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+  fi
 }

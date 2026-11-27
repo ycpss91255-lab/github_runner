@@ -347,3 +347,31 @@ EOF
   run bash -c "ls -d '${RUNNER_WORK_ROOT}'/jit-job-bestffort.* 2>/dev/null | wc -l"
   [ "${output}" = "0" ]
 }
+
+@test "provision-job.sh writes the default ledger under RUNNER_HOME" {
+  # Exercise the installed layout with RUNNER_HOME absent from the environment.
+  local prefix="${WORK}/install" jf
+  mkdir -p "${prefix}/listener"
+  cp "${SCRIPT}" "${prefix}/listener/"
+  cp -R "${ROOT}/lib" "${prefix}/lib"
+  unset RUNNER_HOME RUNNER_HISTORY_DIR RUNNER_HISTORY_LEDGER
+
+  # Keep a broken default from writing to the host root even when run as root.
+  if [[ -e /history || -L /history ]]; then
+    skip "requires /history to be absent to isolate the broken default"
+  fi
+  cat >"${STUB}/mkdir" <<'STUB'
+#!/usr/bin/env bash
+for arg; do
+  case "${arg}" in /history|/history/*) exit 1 ;; esac
+done
+exec /bin/mkdir "$@"
+STUB
+  chmod +x "${STUB}/mkdir"
+
+  jf=$(jit_file ENC)
+  run "${prefix}/listener/provision-job.sh" job-default-history "${jf}" img
+  [ "${status}" -eq 0 ]
+  grep -qxF run "${CAP}"
+  grep -qF $'\tjob_id=job-default-history\t' "${prefix}/runners/history/ledger.tsv"
+}

@@ -44,15 +44,15 @@ configured.**
   short **settle window** (default 3s) for the reading to reflect it, re-probe.
   The near-line margin is not a separate tuned constant — it is one footprint
   wide, implicit in the admission arithmetic.
-- **Two gate points.** `capacityFor` reports the live admittable count to GitHub
-  per poll (a batch far from the line, 1 near it, 0 over it); `provision` runs the
-  same check before each container so a single matrix message brakes mid-batch.
+- **Local admission and reporting.** `admitOne` checks headroom before each
+  runner starts. `capacityFor` estimates headroom for local snapshots. Every
+  poll advertises the pool bound to GitHub.
 - **Safety ceiling, not a roster.** The worker-pool semaphore stays, sized
   internally from the host CPU count — it only bounds goroutines; the reactive
   gate is the real limiter. The operator cannot set it.
 - **Fail safe.** A probe error admits (the semaphore backstops; stranding
   acquired work is worse than a brief over-admit) and reports a conservative
-  capacity of 1 (never 0, which would starve). Context cancellation unblocks a
+  local capacity estimate of 1. Context cancellation unblocks a
   parked admission so shutdown never hangs on a full host.
 - **Go decides, bash reads.** The admission decision lives in the Go listener
   (ADR-0003 already scopes "the concurrency pool / capacity" to Go). The host
@@ -96,4 +96,4 @@ into device-count sizing with an explicit `mode: auto`.
   (reactive GPU/VRAM, stricter band).
 - ADR-0003 (Go/bash boundary): admission in Go, `/proc` reading in bash.
 - `listener/hostprobe.go`, `listener/host-probe.sh`, `listener/listener.go`
-  (`capacityFor`, `admitOne`, `provision`, `resolveBound`).
+  (`capacityFor`, `admitOne`, `reconcile`, `resolveBound`).

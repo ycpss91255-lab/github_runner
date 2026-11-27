@@ -172,11 +172,20 @@ sudo install -d -m 0755 /etc/github-runner-listener
 sudo install -m 0600 deploy/scaleset-listener.env.sample \
   /etc/github-runner-listener/scaleset-listener.env
 sudo "${EDITOR:-vi}" /etc/github-runner-listener/scaleset-listener.env
-# Fill in GITHUB_CONFIG_URL, GITHUB_TOKEN, SCALE_SET_NAME.
+# Fill in GITHUB_CONFIG_URL, GITHUB_TOKEN, SCALE_SET_OWNER, and SCALE_SET_NAME.
 # SCALE_SET_NAME names a scale set; it is NOT what workflows target (section 0).
 # Verify it is 0600 and root-owned:
 sudo stat -c '%a %U' /etc/github-runner-listener/scaleset-listener.env   # -> 600 root
 ```
+
+The listener defaults the session owner to the hostname, then a generated UUID.
+It looks for its scripts under `${LISTENER_PREFIX}/listener` by default. To
+override a script in the environment file, use an absolute path. The deploy
+script fills absent or empty settings on reruns and replaces relative script
+paths with absolute installed paths. It derives a missing owner from
+`hostname` and fails if that lookup fails or returns an empty value. If an existing environment
+file has a mode other than 0600, deployment warns that the token may have been
+exposed and should be rotated, then restores mode 0600.
 
 ## 3a. (Optional) Register a runner type via the per-type config (#110/#112/#113)
 

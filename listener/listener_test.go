@@ -3,6 +3,9 @@ package listener
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -18,18 +21,32 @@ import (
 // client satisfies the same Session interface (proven by the compile-time
 // assertion in listener.go), so the listener cannot tell them apart.
 type fakeSession struct {
+	metadata       scaleset.RunnerScaleSetSession
 	mu             sync.Mutex
 	messages       []*scaleset.RunnerScaleSetMessage // scripted, drained front-to-back
-	getErr         error                             // returned once messages are drained (a real transport error)
-	cancel         context.CancelFunc                // if set, called when messages drain to end the loop via ctx
-	reportedCap    []int                             // maxCapacity passed to each GetMessage
-	deletedIDs     []int                             // messageIDs acked via DeleteMessage
-	acquiredReqIDs [][]int64                         // requestIDs passed to each AcquireJobs
-	closed         bool                              // Close was called (teardown)
+	beforePoll     func(lastMessageID int)
+	afterDelete    func()
+	onAcquire      func(context.Context) error
+	acquireCtx     []error
+	checkContext   bool
+	getErr         error              // returned once messages are drained (a real transport error)
+	cancel         context.CancelFunc // if set, called when messages drain to end the loop via ctx
+	polledAfter    []int              // lastMessageID passed to each GetMessage
+	protocol       []string           // acquire and ack calls in order
+	closeErr       error
+	closeCtxErr    error     // context state when Close was called
+	reportedCap    []int     // maxCapacity passed to each GetMessage
+	deletedIDs     []int     // messageIDs acked via DeleteMessage
+	acquiredReqIDs [][]int64 // requestIDs passed to each AcquireJobs
+	closed         bool      // Close was called (teardown)
 }
 
-func (f *fakeSession) GetMessage(ctx context.Context, _ int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
+func (f *fakeSession) GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	if f.beforePoll != nil {
+		f.beforePoll(lastMessageID)
+	}
 	f.mu.Lock()
+	f.polledAfter = append(f.polledAfter, lastMessageID)
 	f.reportedCap = append(f.reportedCap, maxCapacity)
 	f.mu.Unlock()
 	if len(f.messages) == 0 {
@@ -43,22 +60,35 @@ func (f *fakeSession) GetMessage(ctx context.Context, _ int, maxCapacity int) (*
 		if f.cancel != nil {
 			f.cancel()
 		}
-		return nil, ctx.Err()
+		return nil, fmt.Errorf("failed to get next message: %w", ctx.Err())
 	}
 	msg := f.messages[0]
 	f.messages = f.messages[1:]
 	return msg, nil
 }
 
-func (f *fakeSession) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
-	f.acquiredReqIDs = append(f.acquiredReqIDs, requestIDs)
+func (f *fakeSession) AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error) {
+	f.protocol = append(f.protocol, "acquire")
+	f.acquiredReqIDs = append(f.acquiredReqIDs, slices.Clone(requestIDs))
+	err := ctx.Err()
+	f.acquireCtx = append(f.acquireCtx, err)
+	if f.checkContext && err != nil {
+		return nil, err
+	}
+	if f.onAcquire != nil {
+		return requestIDs, f.onAcquire(ctx)
+	}
 	return requestIDs, nil
 }
 
 func (f *fakeSession) DeleteMessage(_ context.Context, messageID int) error {
 	f.mu.Lock()
+	f.protocol = append(f.protocol, fmt.Sprintf("ack %d", messageID))
 	f.deletedIDs = append(f.deletedIDs, messageID)
 	f.mu.Unlock()
+	if f.afterDelete != nil {
+		f.afterDelete()
+	}
 	return nil
 }
 
@@ -70,12 +100,13 @@ func (f *fakeSession) ackedIDs() []int {
 }
 
 func (f *fakeSession) Session() scaleset.RunnerScaleSetSession {
-	return scaleset.RunnerScaleSetSession{}
+	return f.metadata
 }
 
-func (f *fakeSession) Close(_ context.Context) error {
+func (f *fakeSession) Close(ctx context.Context) error {
 	f.closed = true
-	return nil
+	f.closeCtxErr = ctx.Err()
+	return f.closeErr
 }
 
 // recordingMinter is a mock of the JIT minter seam (the production
@@ -83,15 +114,17 @@ func (f *fakeSession) Close(_ context.Context) error {
 // returns a scripted encoded config per job name and records every mint call so
 // a test can assert the assigned job was minted with the expected name.
 type recordingMinter struct {
-	config   string   // encoded JIT config to return
-	mintErr  error    // returned instead, if set
+	config   string // encoded JIT config to return
+	onMint   func(context.Context, string) error
 	gotNames []string // job names passed to Mint
 }
 
-func (m *recordingMinter) Mint(_ context.Context, name string, _ []string) (string, error) {
+func (m *recordingMinter) Mint(ctx context.Context, name string, _ []string) (string, error) {
 	m.gotNames = append(m.gotNames, name)
-	if m.mintErr != nil {
-		return "", m.mintErr
+	if m.onMint != nil {
+		if err := m.onMint(ctx, name); err != nil {
+			return "", err
+		}
 	}
 	return m.config, nil
 }
@@ -150,6 +183,54 @@ func msgWithAssigned(id int, totalAssigned int, jobs ...*scaleset.JobAssigned) *
 	}
 }
 
+func TestListenAcquiresAvailableJobsAndProvisionsAssignment(t *testing.T) {
+	for _, requestID := range []int64{0, 99} {
+		t.Run(fmt.Sprintf("assigned request ID %d", requestID), func(t *testing.T) {
+			stop := errors.New("end of scripted messages")
+			const jobID = "assigned-job"
+			sess := &fakeSession{
+				messages: []*scaleset.RunnerScaleSetMessage{
+					{
+						MessageID:  17,
+						Statistics: &scaleset.RunnerScaleSetStatistic{},
+						JobAvailableMessages: []*scaleset.JobAvailable{
+							{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41}},
+							{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 82}},
+						},
+					},
+					msgWithAssigned(29, 1, assigned(requestID, jobID, "gpu")),
+				},
+				getErr: stop,
+			}
+			minter := &recordingMinter{config: "encoded-jit"}
+			prov := &recordingProvisioner{}
+			l := New(sess, minter, prov, Config{Image: "runner-image", MaxRunners: 2})
+
+			if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{41, 82}) {
+				t.Errorf("AcquireJobs batches = %v, want [[41 82]] from availability only", sess.acquiredReqIDs)
+			}
+			if want := []string{"ack 17", "acquire", "ack 29"}; !slices.Equal(sess.protocol, want) {
+				t.Errorf("broker calls = %v, want %v", sess.protocol, want)
+			}
+			if want := []int{0, 17, 29}; !slices.Equal(sess.polledAfter, want) {
+				t.Errorf("poll cursors = %v, want %v", sess.polledAfter, want)
+			}
+			if len(minter.gotNames) != 1 {
+				t.Errorf("JIT mint calls = %v, want one", minter.gotNames)
+			}
+			if len(prov.jobs) != 1 {
+				t.Fatalf("provision calls = %d, want one", len(prov.jobs))
+			}
+			if got := prov.jobs[0]; got.JobID != jobID || got.EncodedJITConfig != "encoded-jit" || got.Image != "runner-image" {
+				t.Errorf("provision request = %+v, want assignment %q with minted config and configured image", got, jobID)
+			}
+		})
+	}
+}
+
 // An ASSIGNED job must shell out to the per-job container provisioner, and the
 // JIT config that the listener minted for that job must be handed through.
 func TestAssignedJobTriggersProvisioner(t *testing.T) {
@@ -169,7 +250,7 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 		Runtime: "nvidia",
 	})
 
-	if err := l.Listen(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := l.Listen(ctx); err != nil {
 		t.Fatalf("Listen returned unexpected error: %v", err)
 	}
 	if len(prov.jobs) != 1 {
@@ -204,43 +285,6 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 	}
 }
 
-// Reported capacity is LOCALLY derived (#102): the first poll, with nothing
-// in-flight, offers the full pool bound -- and crucially it does NOT track the
-// server's TotalAssignedJobs (a large statistic must not shrink the offer when
-// nothing is actually running locally).
-func TestInitialCapacityIsFullPoolBound(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sess := &fakeSession{
-		messages: []*scaleset.RunnerScaleSetMessage{
-			// TotalAssignedJobs=3 is deliberately non-zero: under the old
-			// server-derived capacity this poll would have dropped to 5-3=2.
-			msgWithAssigned(1, 3, assigned(1, "j1")),
-		},
-		cancel: cancel,
-	}
-	prov := &recordingProvisioner{}
-	l := New(sess, &recordingMinter{config: "jit"}, prov, Config{Image: "img", MaxRunners: 5})
-
-	_ = l.Listen(ctx)
-
-	if len(sess.reportedCap) < 1 {
-		t.Fatalf("expected at least 1 GetMessage call, got %d", len(sess.reportedCap))
-	}
-	// First poll: nothing in-flight, capacity is the full pool bound.
-	if sess.reportedCap[0] != 5 {
-		t.Errorf("initial capacity: got %d want 5 (pool bound)", sess.reportedCap[0])
-	}
-	// Every reported capacity must stay within [0, bound] and never be derived
-	// from the server's TotalAssignedJobs (the j1 job finishes promptly via the
-	// non-blocking recordingProvisioner, so headroom returns to the full bound).
-	for i, c := range sess.reportedCap {
-		if c < 0 || c > 5 {
-			t.Errorf("reportedCap[%d]=%d outside [0,5]", i, c)
-		}
-	}
-}
-
 // Each processed message must be acked (DeleteMessage) so the long-poll does
 // not redeliver it -- the at-least-once message protocol the client expects.
 func TestProcessedMessageIsAcked(t *testing.T) {
@@ -262,11 +306,8 @@ func TestProcessedMessageIsAcked(t *testing.T) {
 	}
 }
 
-// The message must be acked (DeleteMessage) once its jobs are acquired/
-// dispatched, NOT after the container exits -- otherwise a long-running job
-// would leave the message unacked for its whole duration. With a provisioner
-// that blocks (a slow job), the ack must still land.
-func TestMessageAckedOnAcquireNotAfterJobFinishes(t *testing.T) {
+// The envelope must already be acknowledged while the assigned job is running.
+func TestMessageAckedBeforeJobFinishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess := &fakeSession{
@@ -335,12 +376,18 @@ func TestProvisionerErrorIsIsolatedLoopContinues(t *testing.T) {
 		OnJobErr: func(_ ProvisionRequest, err error) { loggedJobErrs = append(loggedJobErrs, err) },
 	})
 
+	sess.beforePoll = func(lastMessageID int) {
+		if lastMessageID == 1 {
+			l.wg.Wait() // The failed runner has exited before the next demand snapshot.
+		}
+	}
+
 	err := l.Listen(ctx)
 
 	// The loop ends ONLY via ctx cancellation -- the per-job failure must not
 	// have been returned.
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("per-job failure must not end the loop; got %v want context.Canceled", err)
+	if err != nil {
+		t.Errorf("per-job failure must not end the loop; clean shutdown returned %v", err)
 	}
 	// Both messages were processed -- the loop continued past the failed job.
 	if prov.jobCount() != 2 {
@@ -350,7 +397,7 @@ func TestProvisionerErrorIsIsolatedLoopContinues(t *testing.T) {
 	if len(loggedJobErrs) != 1 || !errors.Is(loggedJobErrs[0], wantErr) {
 		t.Errorf("expected the per-job failure to be logged once, got %v", loggedJobErrs)
 	}
-	// Both messages acked despite the failure (ack-on-acquire, #99).
+	// Both envelopes are acknowledged despite the provisioning failure.
 	if got := sess.ackedIDs(); len(got) != 2 {
 		t.Errorf("expected both messages acked, got %v", got)
 	}
@@ -366,11 +413,54 @@ func TestContextCancellationEndsLoopAndTearsDownSession(t *testing.T) {
 	l := New(sess, &recordingMinter{config: "jit"}, prov, Config{Image: "img"})
 
 	err := l.Listen(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("expected ctx cancellation to surface as context.Canceled, got %v", err)
+	if err != nil {
+		t.Errorf("Listen returned %v on clean shutdown, want nil", err)
 	}
 	if !sess.closed {
 		t.Error("expected the session to be torn down (Close) on ctx cancellation")
+	}
+	if sess.closeCtxErr != nil {
+		t.Errorf("Close received a cancelled context: %v", sess.closeCtxErr)
+	}
+}
+
+func TestCloseErrorSurfacesOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wantErr := errors.New("close failed")
+	sess := &fakeSession{closeErr: wantErr}
+	l := New(sess, &recordingMinter{}, &recordingProvisioner{}, Config{})
+
+	if err := l.Listen(ctx); !errors.Is(err, wantErr) {
+		t.Fatalf("Listen returned %v, want %v", err, wantErr)
+	}
+}
+
+func TestAcquireFiltersInvalidAvailableIDs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	invalid := []*scaleset.JobAvailable{
+		nil,
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 0}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: -1}},
+	}
+	mixed := append(slices.Clone(invalid), &scaleset.JobAvailable{
+		JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 42},
+	})
+	sess := &fakeSession{
+		messages: []*scaleset.RunnerScaleSetMessage{
+			{MessageID: 1, JobAvailableMessages: invalid},
+			{MessageID: 2, JobAvailableMessages: mixed},
+		},
+		cancel: cancel,
+	}
+	l := New(sess, &recordingMinter{}, &recordingProvisioner{}, Config{})
+
+	if err := l.Listen(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{42}) {
+		t.Errorf("AcquireJobs batches = %v, want [[42]]", sess.acquiredReqIDs)
 	}
 }
 
@@ -581,87 +671,167 @@ func TestZeroDeviceCountFallsBackToDefault(t *testing.T) {
 	}
 }
 
-// --- #102 locally-derived capacity --------------------------------------------
-
-// Capacity must be derived from the LOCAL in-flight count (pool bound minus
-// running jobs), NOT the server's TotalAssignedJobs. With bound=3 and one job
-// held mid-flight, the next poll must report 2 (3-1); once the job finishes the
-// poll reports the full 3 again -- the reported value tracks local occupancy.
-func TestCapacityIsPoolBoundMinusLocalInFlight(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// The server statistic is deliberately a large, unrelated number: if the
-	// listener still derived capacity from TotalAssignedJobs it would report
-	// bound-99 (clamped to 0), not bound-inflight.
-	sess := &fakeSession{
-		messages: []*scaleset.RunnerScaleSetMessage{
-			msgWithAssigned(1, 99, assigned(1, "held")),
+func TestGetMessageAdvertisesResolvedBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want int
+		jobs int
+	}{
+		{name: "bound one", cfg: Config{MaxRunners: 1}, want: 1, jobs: 1},
+		{name: "bound three", cfg: Config{MaxRunners: 3}, want: 3, jobs: 2},
+		{
+			name: "reactive",
+			cfg: Config{HostProbe: stubProbe{res: HostResources{
+				Free: map[Resource]float64{ResourceCPU: 0.30, ResourceMem: 1.0}, Footprint: 0.125,
+			}}, Reserve: 10},
+			want: runtime.NumCPU(),
+			jobs: 1,
 		},
-		cancel: cancel,
-	}
-	probe := &concurrencyProbe{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-	}
-	l := New(sess, &recordingMinter{config: "jit"}, probe, Config{Image: "img", MaxRunners: 3})
-
-	done := make(chan struct{})
-	go func() { _ = l.Listen(ctx); close(done) }()
-
-	// Wait until the one job is mid-flight, so a subsequent poll sees inflight=1.
-	select {
-	case <-probe.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("job never started")
-	}
-
-	// Poll the reported-capacity history until a value of 2 (3-1) appears while
-	// the job is held -- proving capacity = bound - local in-flight, not derived
-	// from the server's TotalAssignedJobs=99 (which would clamp to 0).
-	sawHeld := false
-	for i := 0; i < 200; i++ {
-		sess.mu.Lock()
-		caps := append([]int(nil), sess.reportedCap...)
-		sess.mu.Unlock()
-		for _, c := range caps {
-			if c == 2 {
-				sawHeld = true
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := make([]*scaleset.JobAssigned, tc.jobs)
+			for i := range jobs {
+				jobs[i] = assigned(int64(i+1), fmt.Sprintf("held-%d", i+1))
 			}
-			if c < 0 || c > 3 {
-				t.Fatalf("reported capacity %d outside [0,bound=3]", c)
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{
+				messages: []*scaleset.RunnerScaleSetMessage{msgWithAssigned(1, tc.jobs, jobs...)},
+				getErr:   stop,
 			}
-		}
-		if sawHeld {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			prov := &recordingProvisioner{block: release}
+			l := New(sess, &recordingMinter{config: "jit"}, prov, tc.cfg)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			context.AfterFunc(ctx, func() { releaseOnce.Do(func() { close(release) }) })
+			sess.beforePoll = func(lastMessageID int) {
+				if lastMessageID == 1 {
+					if got := l.inFlight.Load(); got != int64(tc.jobs) {
+						t.Errorf("in flight at second poll = %d, want %d", got, tc.jobs)
+					}
+					releaseOnce.Do(func() { close(release) })
+				}
+			}
+
+			if err := l.Listen(ctx); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if want := []int{tc.want, tc.want}; !slices.Equal(sess.reportedCap, want) {
+				t.Errorf("GetMessage maxCapacity = %v, want %v", sess.reportedCap, want)
+			}
+		})
 	}
-	if !sawHeld {
-		t.Fatal("never reported capacity 2 (bound 3 - 1 in-flight) while a job was held")
+}
+
+func TestListenReconcilesAssignedJobStatistics(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		initial    int
+		messages   []*scaleset.RunnerScaleSetMessage
+		wantAtPoll []int
+	}{
+		{
+			name:    "startup and matching assignment",
+			initial: 2,
+			messages: []*scaleset.RunnerScaleSetMessage{
+				msgWithAssigned(1, 2, assigned(41, "already-covered")),
+			},
+			wantAtPoll: []int{2, 2},
+		},
+		{
+			name:       "startup capped at bound",
+			initial:    9,
+			wantAtPoll: []int{3},
+		},
+		{
+			name: "message shortfall capped at bound",
+			messages: []*scaleset.RunnerScaleSetMessage{
+				msgWithAssigned(1, 0),
+				msgWithAssigned(2, 1, assigned(42, "held")),
+				msgWithAssigned(3, 2),
+				msgWithAssigned(4, 9),
+			},
+			wantAtPoll: []int{0, 0, 1, 2, 3},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{
+				metadata: scaleset.RunnerScaleSetSession{
+					Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: tc.initial},
+				},
+				messages: tc.messages,
+				getErr:   stop,
+			}
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			prov := &recordingProvisioner{block: release}
+			minter := &recordingMinter{config: "jit"}
+			l := New(sess, minter, prov, Config{MaxRunners: 3})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			context.AfterFunc(ctx, func() { releaseOnce.Do(func() { close(release) }) })
+			var atPoll []int
+			sess.beforePoll = func(int) {
+				atPoll = append(atPoll, int(l.inFlight.Load()))
+				if len(atPoll) == len(tc.wantAtPoll) {
+					releaseOnce.Do(func() { close(release) })
+				}
+			}
+
+			if err := l.Listen(ctx); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if !slices.Equal(atPoll, tc.wantAtPoll) {
+				t.Errorf("runners in flight at each poll = %v, want %v", atPoll, tc.wantAtPoll)
+			}
+			want := tc.wantAtPoll[len(tc.wantAtPoll)-1]
+			if got := len(minter.gotNames); got != want {
+				t.Errorf("JIT mint calls = %d, want %d", got, want)
+			}
+			if got := prov.jobCount(); got != want {
+				t.Errorf("provision calls = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestListenNilPollReconcilesLatestStatistics(t *testing.T) {
+	stop := errors.New("end of scripted messages")
+	sess := &fakeSession{
+		metadata: scaleset.RunnerScaleSetSession{
+			Statistics: &scaleset.RunnerScaleSetStatistic{},
+		},
+		messages: []*scaleset.RunnerScaleSetMessage{
+			msgWithAssigned(1, 1, assigned(41, "exited-runner")),
+			nil,
+		},
+		getErr: stop,
+	}
+	minter := &recordingMinter{config: "jit"}
+	prov := &recordingProvisioner{}
+	l := New(sess, minter, prov, Config{MaxRunners: 1})
+	sess.beforePoll = func(lastMessageID int) {
+		if lastMessageID == 1 {
+			// The ephemeral provisioner has returned before each subsequent
+			// poll responds, so nil must retry the last known desired count.
+			l.wg.Wait()
+		}
 	}
 
-	// Release the job; capacity must climb back to the full bound (3) once the
-	// in-flight count drops.
-	close(probe.release)
-	sawFull := false
-	for i := 0; i < 200; i++ {
-		sess.mu.Lock()
-		caps := append([]int(nil), sess.reportedCap...)
-		sess.mu.Unlock()
-		for _, c := range caps {
-			if c == 3 {
-				sawFull = true
-			}
-		}
-		if sawFull {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+		t.Fatalf("Listen returned %v, want %v", err, stop)
 	}
-	cancel()
-	<-done
-	if !sawFull {
-		t.Fatal("capacity never returned to the full bound after the job finished")
+	if got := len(minter.gotNames); got != 2 {
+		t.Errorf("JIT mint calls = %d, want 2 (initial runner and nil-poll replacement)", got)
+	}
+	if got := prov.jobCount(); got != 2 {
+		t.Errorf("provision calls = %d, want 2", got)
+	}
+	if want := []int{1}; !slices.Equal(sess.deletedIDs, want) {
+		t.Errorf("acknowledged IDs = %v, want %v", sess.deletedIDs, want)
 	}
 }
 
@@ -741,7 +911,7 @@ func TestLoopKeepsPollingWhileJobsRun(t *testing.T) {
 	sess := &fakeSession{
 		messages: []*scaleset.RunnerScaleSetMessage{
 			msgWithAssigned(1, 1, assigned(1, "slow-1")),
-			msgWithAssigned(2, 1, assigned(2, "slow-2")),
+			msgWithAssigned(2, 2, assigned(2, "slow-2")),
 		},
 		cancel: cancel,
 	}
@@ -773,7 +943,7 @@ func TestLoopKeepsPollingWhileJobsRun(t *testing.T) {
 }
 
 // The pool must be BOUNDED: with a bound of 2 and three jobs offered at once,
-// no more than 2 run simultaneously. The third waits for a slot.
+// no more than 2 run simultaneously. The third is outside the capped target.
 func TestPoolBoundCapsConcurrency(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -793,8 +963,7 @@ func TestPoolBoundCapsConcurrency(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = l.Listen(ctx); close(done) }()
 
-	// Exactly 2 jobs may start while the slot-holders are blocked; the 3rd must
-	// wait. Drain 2 starts, then assert no 3rd arrives until we release.
+	// Exactly 2 jobs may start while the slot-holders are blocked.
 	for i := 0; i < 2; i++ {
 		select {
 		case <-probe.started:
@@ -806,7 +975,7 @@ func TestPoolBoundCapsConcurrency(t *testing.T) {
 	case <-probe.started:
 		t.Fatal("a 3rd job started while the bound is 2 (semaphore not enforced)")
 	case <-time.After(150 * time.Millisecond):
-		// good -- the 3rd job is parked waiting for a slot.
+		// The third is outside the capped target.
 	}
 	if got := probe.peakLive(); got > 2 {
 		t.Fatalf("concurrency exceeded the bound of 2: peak %d", got)
@@ -1021,5 +1190,217 @@ func TestTrackedJobIDIsSanitizedToMatchContainerLabel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Listen did not return after the held job was released")
+	}
+}
+
+func TestListenDeduplicatesInFlightRawJobID(t *testing.T) {
+	const jobID, siblingID = "abcd", "ab\tcd"
+	if canonicalJobID(jobID) != canonicalJobID(siblingID) {
+		t.Fatal("fixture JobIDs must share a canonical key")
+	}
+
+	for _, duplicateInEnvelope := range []bool{false, true} {
+		name := "later envelope"
+		if duplicateInEnvelope {
+			name = "same envelope"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := msgWithAssigned(1, 1, assigned(11, jobID))
+			duplicate := assigned(12, jobID)
+			sibling := assigned(13, siblingID)
+			messages := []*scaleset.RunnerScaleSetMessage{first}
+			lastBeforeRelease := 1
+			if duplicateInEnvelope {
+				first.Statistics.TotalAssignedJobs = 2
+				first.JobAssignedMessages = append(first.JobAssignedMessages, duplicate, sibling)
+			} else {
+				messages = append(messages, msgWithAssigned(2, 2, duplicate, sibling))
+				lastBeforeRelease = 2
+			}
+			messages = append(messages, msgWithAssigned(3, 1, assigned(14, jobID)))
+
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{messages: messages, getErr: stop}
+			minter := &recordingMinter{config: "jit"}
+			prov := &recordingProvisioner{
+				started: make(chan struct{}, 4),
+				block:   make(chan struct{}),
+			}
+			l := New(sess, minter, prov, Config{MaxRunners: 4})
+			sess.beforePoll = func(lastMessageID int) {
+				if lastMessageID == 1 && !duplicateInEnvelope {
+					select {
+					case <-prov.started:
+					case <-time.After(2 * time.Second):
+						t.Error("first job did not start before its redelivery")
+					}
+				}
+				if lastMessageID == lastBeforeRelease {
+					close(prov.block)
+					l.wg.Wait()
+				}
+			}
+
+			if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if want := []string{jobID, siblingID, jobID}; !slices.Equal(minter.gotNames, want) {
+				t.Errorf("Mint names = %q, want %q", minter.gotNames, want)
+			}
+			var provisioned []int64
+			for _, req := range prov.jobs {
+				provisioned = append(provisioned, req.RequestID)
+			}
+			slices.Sort(provisioned)
+			if want := []int64{11, 13, 14}; !slices.Equal(provisioned, want) {
+				t.Errorf("provisioned request IDs = %v, want %v", provisioned, want)
+			}
+			if len(minter.gotNames) != len(provisioned) {
+				t.Errorf("Mint called %d times for %d provisions", len(minter.gotNames), len(provisioned))
+			}
+		})
+	}
+}
+
+func TestListenProcessesAcknowledgedEnvelopeAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	msg := msgWithAssigned(17, 2, assigned(42, "job-abc"), assigned(43, "job-def"))
+	msg.JobAvailableMessages = []*scaleset.JobAvailable{
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41}},
+	}
+	sess := &fakeSession{
+		messages:     []*scaleset.RunnerScaleSetMessage{msg},
+		afterDelete:  cancel,
+		checkContext: true,
+	}
+	minter := &recordingMinter{config: "jit"}
+	prov := &recordingProvisioner{}
+	l := New(sess, minter, prov, Config{})
+
+	if err := l.Listen(ctx); err != nil {
+		t.Errorf("Listen returned %v after cancellation, want nil", err)
+	}
+	if got := sess.ackedIDs(); !slices.Equal(got, []int{17}) {
+		t.Errorf("acknowledged envelopes = %v, want [17]", got)
+	}
+	if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{41}) {
+		t.Errorf("AcquireJobs batches = %v, want [[41]]", sess.acquiredReqIDs)
+	}
+	if !slices.Equal(sess.acquireCtx, []error{nil}) {
+		t.Errorf("AcquireJobs context errors = %v, want [nil]", sess.acquireCtx)
+	}
+	if len(minter.gotNames) != 0 {
+		t.Errorf("Mint called for undispatched assignments %q", minter.gotNames)
+	}
+	if got := prov.jobCount(); got != 0 {
+		t.Errorf("provisioned jobs = %d, want 0", got)
+	}
+}
+
+func TestListenBoundsEnvelopeRequests(t *testing.T) {
+	const requestTimeout = 25 * time.Millisecond
+	const testBound = 2 * time.Second
+	for _, operation := range []string{"AcquireJobs", "Mint"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			requestCtx := make(chan context.Context, 1)
+			stopFake := make(chan struct{})
+			defer close(stopFake)
+			block := func(ctx context.Context) error {
+				requestCtx <- ctx
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-stopFake:
+					return errors.New("test stopped waiting for request")
+				}
+			}
+
+			msg := &scaleset.RunnerScaleSetMessage{MessageID: 17}
+			sess := &fakeSession{
+				messages: []*scaleset.RunnerScaleSetMessage{msg},
+				getErr:   errors.New("end of scripted messages"),
+			}
+			minter := &recordingMinter{}
+			if operation == "AcquireJobs" {
+				msg.JobAvailableMessages = []*scaleset.JobAvailable{
+					{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41}},
+				}
+				sess.onAcquire = block
+			} else {
+				msg.Statistics = &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
+				msg.JobAssignedMessages = []*scaleset.JobAssigned{assigned(42, "job-abc")}
+				minter.onMint = func(ctx context.Context, _ string) error { return block(ctx) }
+			}
+
+			cfg := Config{RequestTimeout: requestTimeout}
+
+			l := New(sess, minter, &recordingProvisioner{}, cfg)
+			done := make(chan error, 1)
+			go func() { done <- l.Listen(ctx) }()
+
+			select {
+			case callCtx := <-requestCtx:
+				deadline, ok := callCtx.Deadline()
+				if !ok {
+					t.Errorf("%s context has no deadline", operation)
+				} else if remaining := time.Until(deadline); remaining > requestTimeout {
+					t.Errorf("%s deadline is %v away, want at most %v", operation, remaining, requestTimeout)
+				}
+			case <-time.After(testBound):
+				t.Fatalf("%s did not start", operation)
+			}
+
+			if operation == "AcquireJobs" {
+				cancel()
+			}
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Errorf("Listen returned %v, want %v", err, context.DeadlineExceeded)
+				}
+			case <-time.After(testBound):
+				t.Errorf("Listen did not return within %v with %s blocked", testBound, operation)
+			}
+		})
+	}
+}
+
+func TestListenReturnsMintErrorAfterDispatchingEarlierAssignment(t *testing.T) {
+	mintErr := errors.New("mint failed")
+	sess := &fakeSession{messages: []*scaleset.RunnerScaleSetMessage{
+		msgWithAssigned(17, 3, assigned(41, "first"), assigned(42, "failed"), assigned(43, "later")),
+	}}
+	minter := &recordingMinter{
+		config: "jit",
+		onMint: func(_ context.Context, name string) error {
+			if name == "failed" {
+				return mintErr
+			}
+			return nil
+		},
+	}
+	prov := &recordingProvisioner{}
+	l := New(sess, minter, prov, Config{MaxRunners: 3})
+
+	if err := l.Listen(context.Background()); !errors.Is(err, mintErr) {
+		t.Errorf("Listen returned %v, want %v", err, mintErr)
+	}
+	if got := minter.gotNames; !slices.Equal(got, []string{"first", "failed"}) {
+		t.Errorf("Mint names = %q, want [first failed]", got)
+	}
+	if len(prov.jobs) != 1 || prov.jobs[0].RequestID != 41 {
+		t.Errorf("provisioned jobs = %+v, want only request 41", prov.jobs)
+	}
+	for _, name := range []string{"first", "failed", "later"} {
+		if !l.reserveAssignment(name) {
+			t.Errorf("assignment %q is still reserved after Listen returned", name)
+			continue
+		}
+		l.releaseAssignment(name)
 	}
 }

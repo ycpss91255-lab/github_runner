@@ -465,20 +465,20 @@ td {
   <text x="750" y="250" text-anchor="middle" font-size="8" fill="var(--text-1)">classic runners (legacy)</text>
   <text x="440" y="288" text-anchor="middle" font-size="8" fill="var(--text-3)">SEC-3: all rm -rf anchored under this root</text>
 </svg>
-<figcaption>部署拓撲。<code>sudo just deploy --config-url ...</code> 一個指令建立以上所有：build + install binary、建 service user、寫 env file（0600，存 token）、安裝 systemd unit、enable + start、驗證。idempotent，re-run 跳過已完成的步驟。</figcaption>
+<figcaption>部署拓撲。<code>sudo just deploy --config-url ...</code> 一個指令建立以上所有：build + install binary、建 service user、寫 env file（0600，存 token）、安裝 systemd unit、enable + start、驗證。重跑會補齊缺少的環境變數並保留既有設定。</figcaption>
 </figure>
 
 <!-- ============================================================ -->
 <h2><span class="num">4.</span> Job 資料流</h2>
 
-<p class="desc">一個 GitHub Actions job 從 assignment 到 container 執行到 history capture 的完整路徑。</p>
+<p class="desc">一個 GitHub Actions job 從 availability 到 container 執行到 history capture 的完整路徑。</p>
 
 <figure>
-<svg viewBox="0 0 880 480" role="img" aria-label="Job data flow: GitHub assignment through container execution to history capture">
+<svg viewBox="0 0 880 480" role="img" aria-label="Job data flow: GitHub availability through container execution to history capture">
   <!-- Flow steps -->
-  <!-- 1. GitHub assigns -->
+  <!-- 1. GitHub signals availability -->
   <rect x="340" y="20" width="200" height="36" rx="18" fill="var(--github-fill)" stroke="var(--github)" stroke-width="1.5"/>
-  <text x="440" y="43" text-anchor="middle" font-size="10" fill="var(--github)">GitHub assigns job</text>
+  <text x="440" y="43" text-anchor="middle" font-size="10" fill="var(--github)">GitHub signals availability</text>
 
   <line x1="440" y1="56" x2="440" y2="76" stroke="var(--arrow)" stroke-width="1.2" marker-end="url(#ah)"/>
 
@@ -488,22 +488,21 @@ td {
 
   <line x1="440" y1="110" x2="440" y2="128" stroke="var(--arrow)" stroke-width="1.2" marker-end="url(#ah)"/>
 
-  <!-- 3. AcquireJobs -->
+  <!-- 3. Ack availability, then acquire -->
   <rect x="340" y="130" width="200" height="32" rx="4" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.2"/>
-  <text x="440" y="151" text-anchor="middle" font-size="9" fill="var(--go)">AcquireJobs(requestID)</text>
+  <text x="440" y="151" text-anchor="middle" font-size="9" fill="var(--go)">Ack → AcquireJobs(available IDs)</text>
 
   <line x1="440" y1="162" x2="440" y2="180" stroke="var(--arrow)" stroke-width="1.2" marker-end="url(#ah)"/>
 
-  <!-- 4. Mint JIT -->
+  <!-- 4. Poll and acknowledge assignment -->
   <rect x="340" y="182" width="200" height="32" rx="4" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.2"/>
-  <text x="440" y="203" text-anchor="middle" font-size="9" fill="var(--go)">Mint JIT config</text>
+  <text x="440" y="203" text-anchor="middle" font-size="9" fill="var(--go)">Poll → ack assignment</text>
 
   <line x1="440" y1="214" x2="440" y2="232" stroke="var(--arrow)" stroke-width="1.2" marker-end="url(#ah)"/>
 
-  <!-- 5. DeleteMessage (ack) -->
+  <!-- 5. Mint JIT -->
   <rect x="340" y="234" width="200" height="32" rx="4" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.2"/>
-  <text x="440" y="255" text-anchor="middle" font-size="9" fill="var(--go)">DeleteMessage (ack)</text>
-  <text x="560" y="255" font-size="7" fill="var(--text-3)">before container run</text>
+  <text x="440" y="255" text-anchor="middle" font-size="9" fill="var(--go)">Mint JIT config (job ID)</text>
 
   <line x1="440" y1="266" x2="440" y2="282" stroke="var(--arrow)" stroke-width="1.2" marker-end="url(#ah)"/>
 
@@ -540,18 +539,18 @@ td {
   <!-- Side annotations -->
   <text x="30" y="99" font-size="8" fill="var(--text-3)">long-poll</text>
   <text x="30" y="151" font-size="8" fill="var(--text-3)">claim work</text>
-  <text x="30" y="203" font-size="8" fill="var(--text-3)">credential</text>
+  <text x="30" y="255" font-size="8" fill="var(--text-3)">credential</text>
   <text x="30" y="375" font-size="8" fill="var(--text-3)">docker run --rm</text>
   <text x="30" y="427" font-size="8" fill="var(--text-3)">trusted ledger only</text>
 
   <!-- JIT config file annotation -->
-  <rect x="620" y="182" width="220" height="48" rx="4" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1"/>
-  <text x="730" y="200" text-anchor="middle" font-size="8" fill="var(--warn)">JIT config: FILE, never argv</text>
-  <text x="730" y="216" text-anchor="middle" font-size="7" fill="var(--text-2)">0600, per-job temp dir, rm on exit</text>
-  <text x="730" y="226" text-anchor="middle" font-size="7" fill="var(--text-2)">ADR-0003 / #133</text>
-  <line x1="540" y1="198" x2="618" y2="200" stroke="var(--warn)" stroke-width="0.8" stroke-dasharray="3,2"/>
+  <rect x="620" y="234" width="220" height="48" rx="4" fill="var(--warn-soft)" stroke="var(--warn)" stroke-width="1"/>
+  <text x="730" y="252" text-anchor="middle" font-size="8" fill="var(--warn)">JIT config: FILE, never argv</text>
+  <text x="730" y="268" text-anchor="middle" font-size="7" fill="var(--text-2)">0600, per-job temp dir, rm on exit</text>
+  <text x="730" y="278" text-anchor="middle" font-size="7" fill="var(--text-2)">ADR-0003 / #133</text>
+  <line x1="540" y1="250" x2="618" y2="252" stroke="var(--warn)" stroke-width="0.8" stroke-dasharray="3,2"/>
 </svg>
-<figcaption>Job 資料流。注意 ack（DeleteMessage）發生在 container run <strong>之前</strong>，所以慢 job 不會阻塞 message session。JIT config 透過檔案傳遞（0600 + per-job temp dir + rm on exit），不走 argv（ADR-0003 / #133）。History capture 只寫 trusted ledger record（#124），不持久化 attacker-controlled stdout。</figcaption>
+<figcaption>Job 資料流。Listener 先用 DeleteMessage 確認訊息，再批次取得有效的 availability request ID。收到 assignment 後，listener 確認訊息並用 job ID 建立 JIT config。JIT config 透過檔案傳遞（0600 + per-job temp dir + rm on exit），不走 argv（ADR-0003 / #133）。History capture 只寫 trusted ledger record（#124），不持久化 attacker-controlled stdout。</figcaption>
 </figure>
 
 <!-- ============================================================ -->
@@ -1058,9 +1057,9 @@ td {
 
 <figure>
 <svg viewBox="0 0 880 380" role="img" aria-label="Reactive admission flow: probe, admits(), settle, re-probe loop">
-  <!-- capacityFor (poll-time) -->
+  <!-- capacityFor (local snapshot) -->
   <rect x="30" y="20" width="380" height="150" rx="8" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.2"/>
-  <text x="220" y="44" text-anchor="middle" font-size="10" font-weight="600" fill="var(--go)">capacityFor (per poll)</text>
+  <text x="220" y="44" text-anchor="middle" font-size="10" font-weight="600" fill="var(--go)">capacityFor (local snapshot)</text>
 
   <rect x="50" y="56" width="140" height="28" rx="4" fill="var(--surface)" stroke="var(--go-soft)" stroke-width="1"/>
   <text x="120" y="75" text-anchor="middle" font-size="8" fill="var(--text-1)">probe.Probe(ctx)</text>
@@ -1130,7 +1129,7 @@ td {
   <text x="220" y="330" text-anchor="middle" font-size="8" fill="var(--text-1)">reserve: operator knob (default 10%, upward-only, min 10)</text>
   <text x="220" y="346" text-anchor="middle" font-size="8" fill="var(--text-2)">sem ceiling: internal safety (nproc), not operator-set</text>
 </svg>
-<figcaption>反應式准入（ADR-0005）。准入在兩處發生：<code>capacityFor</code>（per poll，回報給 GitHub batch size）和 <code>admitOne</code>（per job，mid-batch brake）。CPU 使用 in-flight count 預測（loadavg 滯後），memory 直接讀取（即時）。Probe error fail-safe：准入（sem ceiling 是最後防線）。</figcaption>
+<figcaption>Reactive admission (ADR-0005). <code>capacityFor</code> estimates local headroom for snapshots. Each GitHub poll advertises the pool bound. <code>admitOne</code> checks reserve headroom before each runner starts. CPU admission accounts for in-flight runners because load averages lag. Memory admission uses the current reading. On probe error the semaphore still caps concurrency.</figcaption>
 </figure>
 
 <!-- ============================================================ -->

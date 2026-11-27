@@ -34,12 +34,11 @@ type JobRecord struct {
 }
 
 // CapacityRecord is the periodic capacity/in-flight snapshot (#131): the pool
-// bound, how many jobs are in-flight right now, and the spare capacity reported
-// to GitHub. Emitted on an interval so live occupancy is observable.
+// bound, the in-flight runner count, and estimated local admission headroom.
 type CapacityRecord struct {
 	Bound    int // worker-pool ceiling
 	InFlight int // jobs currently being provisioned
-	Capacity int // spare capacity offered to GitHub (bound - inFlight)
+	Capacity int // estimated local admission headroom
 }
 
 // slogJobLogger is the production JobLogger: it emits structured records via

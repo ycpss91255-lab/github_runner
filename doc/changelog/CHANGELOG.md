@@ -92,6 +92,35 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The scale-set listener avoids the 404 from acquiring request ID 0.**
+  It acquires valid available request IDs in one batch after acknowledging the
+  envelope, matching [upstream v0.4.0 `handleMessage`](https://github.com/actions/scaleset/blob/v0.4.0/listener/listener.go).
+  Every poll advertises the resolved pool bound. The listener reconciles
+  `TotalAssignedJobs` at startup, on messages with statistics, and on empty
+  polls using the latest known statistics. Idle, busy, and dispatched runners
+  count toward the capped target. Each new runner gets its JIT config just
+  before dispatch, after local admission. Assignment events can supply metadata
+  within the shortfall, even with a zero request ID. Duplicate raw job IDs are
+  skipped while an assignment is pending dispatch or running.
+  End-to-end delivery of a live job remains unverified (#134).
+  Acquisition and mint requests each have a 30-second timeout by default.
+  On SIGTERM the listener still acquires available jobs for the acknowledged
+  envelope, skips minting for assignments still waiting for admission or a
+  worker slot, drains its workers, and closes the session with a fresh bounded
+  context.
+- **Listener deployment fills in the scale-set owner and installed script paths.**
+  The listener uses the configured owner, the hostname, or a generated UUID in
+  that order. It resolves default script paths under the installation's
+  `listener/` directory. Deployment reruns backfill absent or empty settings
+  and replace effective relative script paths with absolute installed paths.
+  They preserve absolute paths and reuse the stored token. Deployment derives
+  a missing owner from `hostname` and fails if that lookup fails or is empty.
+  Deployment warns to rotate a potentially exposed token before restoring an
+  existing environment file to mode 0600.
+- **Job provisioning writes the default history ledger under the runner home.**
+  The provisioner resolves the runner home before loading the history library,
+  so the default ledger is `RUNNER_HOME/history/ledger.tsv`.
+
 - **Listener jobs no longer fail with `./run.sh: not found`.** The per-job
   container bound the fresh, empty per-job host dir over `/runner` and ran
   `./run.sh` from there, so the runner the image ships at `/home/runner` was

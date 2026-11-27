@@ -1,7 +1,7 @@
 // Command scaleset-listener is the production entrypoint that wires the
 // official Runner Scale Set Client (github.com/actions/scaleset) into the
 // provisioning glue in package listener (ADR-0001 Phase 4). It holds the
-// outbound long-poll scale-set session and, for each ASSIGNED job, shells out
+// outbound long-poll scale-set session and, as assigned demand grows, shells out
 // to the per-job container provisioner (provision-job.sh -> Phase 3
 // lib/runner-container.sh) so the job runs in a fresh, single-use, rootless
 // container.
@@ -17,9 +17,11 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/actions/scaleset"
+	"github.com/google/uuid"
 
 	"github.com/ycpss91255-lab/github_runner/listener"
 )
@@ -30,6 +32,20 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func resolveOwner(getenv func(string) string, hostname func() (string, error), newID func() string) string {
+	if owner := getenv("SCALE_SET_OWNER"); owner != "" {
+		return owner
+	}
+	if host, err := hostname(); err == nil && host != "" {
+		return host
+	}
+	return newID()
+}
+
+func resolveScriptPath(exe, key, name string) string {
+	return envOr(key, filepath.Join(filepath.Dir(exe), "..", "listener", name))
 }
 
 // selectInstance loads the runner-type config (the Go loader is the
@@ -53,9 +69,20 @@ func main() {
 
 	configURL := os.Getenv("GITHUB_CONFIG_URL") // e.g. https://github.com/<org>
 	token := os.Getenv("GITHUB_TOKEN")          // scale-set admin scope
-	owner := os.Getenv("SCALE_SET_OWNER")       // owner string for the session
+	owner := resolveOwner(os.Getenv, os.Hostname, uuid.NewString)
 	if configURL == "" || token == "" {
 		log.Fatal("set GITHUB_CONFIG_URL and GITHUB_TOKEN")
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		log.Printf("locate listener executable: %v. Resolving script defaults from the working directory", err)
+		exe = filepath.Join("bin", "scaleset-listener")
+		if abs, absErr := filepath.Abs(exe); absErr == nil {
+			exe = abs
+		} else {
+			log.Printf("resolve working directory: %v", absErr)
+		}
 	}
 
 	// Host-inspection seams shared across runner types:
@@ -65,7 +92,7 @@ func main() {
 	//     from host-probe.sh, driving reactive live-admission for the default types.
 	// A missing tool falls back to the listener's conservative default bound.
 	detector := listener.DeviceDetector(listener.CommandDeviceDetector{Name: envOr("DEVICE_DETECT_CMD", "nvidia-smi")})
-	hostProbe := listener.HostProbe(listener.CommandHostProbe{Name: envOr("HOST_PROBE_CMD", "host-probe.sh")})
+	hostProbe := listener.HostProbe(listener.CommandHostProbe{Name: resolveScriptPath(exe, "HOST_PROBE_CMD", "host-probe.sh")})
 	deps := listener.InstanceDeps{Detector: detector, HostProbe: hostProbe}
 
 	// Per-runner-type config (#110/#112): when RUNNER_TYPES_CONFIG is set, the Go
@@ -157,8 +184,8 @@ func main() {
 	// Mint each job's single-use JIT config via the Go client (ADR-0001:
 	// minting lives on the Go side of the boundary).
 	minter := &listener.ClientJITMinter{Client: client, ScaleSetID: scaleSet.ID}
-	prov := &listener.ContainerProvisioner{Script: envOr("PROVISION_SCRIPT", "provision-job.sh")}
-	reaper := &listener.ScriptReaper{Script: envOr("REAP_SCRIPT", "reap.sh")}
+	prov := &listener.ContainerProvisioner{Script: resolveScriptPath(exe, "PROVISION_SCRIPT", "provision-job.sh")}
+	reaper := &listener.ScriptReaper{Script: resolveScriptPath(exe, "REAP_SCRIPT", "reap.sh")}
 	// Structured per-job logging (#131): one record per finished job (id, image,
 	// exit, duration) plus periodic capacity/in-flight snapshots, emitted via slog
 	// to stderr, which journald captures when this runs as a systemd unit.
