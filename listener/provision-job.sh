@@ -97,10 +97,15 @@ fi
 # combined stdout/stderr is FULLY attacker-controlled job-console output whose
 # authoritative copy already lives in GitHub's job log, so we never durably
 # capture that stream on the host (ADR-0002 / #154).
+# The container seam writes the JIT credential to a mode-0600 sibling env file
+# (<runner_dir>.jitconfig.env) and removes it with a RETURN trap. That trap does
+# not run when this script is terminated mid-job (e.g. SIGTERM on a listener
+# restart), so the EXIT trap removes the env file too.
 # Quote the cleanup arguments for the trap's second parse (#142).
 printf -v purge_args '%q %q' "${runner_dir}" "${image}"
+printf -v env_file_q '%q' "${runner_dir%/}.jitconfig.env"
 # shellcheck disable=SC2064  # expand now using %q
-trap "runner_workdir_purge ${purge_args}" EXIT
+trap "rm -f -- ${env_file_q}; runner_workdir_purge ${purge_args}" EXIT
 if [[ -n "${RUNNER_DOCKER_SOCKET}" ]]; then
   chmod 0777 -- "${runner_dir}"
 fi

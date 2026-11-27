@@ -153,3 +153,22 @@ STUB
   grep -qxF -- "${orphan}:/purge:Z" "${PURGE_CAP}"
   ! grep -qF -- "${tracked}" "${PURGE_CAP}"
 }
+
+@test "reap.sh removes stale JIT credential env files and spares a tracked job's file" {
+  ( umask 077
+    : >"${RUNNER_WORK_ROOT}/jit-orphan.0123abcd.jitconfig.env"
+    : >"${RUNNER_WORK_ROOT}/jit-live.abcdef12.jitconfig.env" )
+  run "${SCRIPT}" live
+  [ "${status}" -eq 0 ]
+  [ ! -e "${RUNNER_WORK_ROOT}/jit-orphan.0123abcd.jitconfig.env" ]
+  [ -f "${RUNNER_WORK_ROOT}/jit-live.abcdef12.jitconfig.env" ]
+}
+
+@test "reap.sh removes stale JIT credential env files under RUNNER_HOME/work in the DEFAULT config" {
+  unset RUNNER_WORK_ROOT
+  mkdir -p "${RUNNER_HOME}/work"
+  ( umask 077; : >"${RUNNER_HOME}/work/jit-orphan.XYZ.jitconfig.env"; )
+  run "${SCRIPT}"
+  [ "${status}" -eq 0 ]
+  [ ! -e "${RUNNER_HOME}/work/jit-orphan.XYZ.jitconfig.env" ]
+}
