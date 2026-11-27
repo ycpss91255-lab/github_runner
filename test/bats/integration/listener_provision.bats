@@ -221,6 +221,41 @@ teardown() { rm -rf "${WORK}" "${STUB}"; }
   [ "${output}" = "0" ]
 }
 
+@test "provision-job.sh removes the JIT credential env file when the job succeeds or fails" {
+  for rc in 0 7; do
+    export CLI_RC=${rc}
+    run "${SCRIPT}" job-abc "$(jit_file ENC)" img
+    [ "${status}" -eq "${rc}" ]
+    run bash -c "ls '${RUNNER_WORK_ROOT}'/*.jitconfig.env 2>/dev/null | wc -l"
+    [ "${output}" = "0" ]
+  done
+}
+
+@test "provision-job.sh removes the JIT credential env file when it is terminated mid-job" {
+  # A listener restart sends SIGTERM while the container is still running. The
+  # RETURN trap inside the container seam never fires on that path, so the
+  # script's own EXIT trap must remove the 0600 credential env file.
+  export RUNNER_JOB_MAX_LIFETIME=0
+  STARTED="${WORK}/started"
+  cat >"${STUB}/docker" <<EOF
+#!/usr/bin/env bash
+ls "${RUNNER_WORK_ROOT}"/*.jitconfig.env > "${STARTED}.env" 2>/dev/null
+echo \$\$ > "${STARTED}"
+exec sleep 30
+EOF
+  chmod +x "${STUB}/docker"
+  "${SCRIPT}" job-term "$(jit_file ENC)" img >/dev/null 2>&1 &
+  pid=$!
+  for _ in $(seq 1 100); do [ -s "${STARTED}" ] && break; sleep 0.1; done
+  [ -s "${STARTED}" ]
+  [ -s "${STARTED}.env" ]   # the env file existed while the job ran
+  kill -TERM "${pid}"
+  wait "${pid}" || :
+  kill "$(cat "${STARTED}")" 2>/dev/null || :
+  run bash -c "ls '${RUNNER_WORK_ROOT}'/*.jitconfig.env 2>/dev/null | wc -l"
+  [ "${output}" = "0" ]
+}
+
 # --- capture-before-teardown (ADR-0002, #123/#124/#125) -------------------
 
 @test "provision-job.sh captures a ledger record BEFORE teardown, on success (#123/#124)" {
