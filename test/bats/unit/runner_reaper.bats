@@ -204,6 +204,49 @@ EOF
   rm -rf "${WR}"
 }
 
+@test "prune removes a stale per-job JIT credential env file not tracked" {
+  WR=$(mktemp -d)
+  ( umask 077; : >"${WR}/jit-orphan.AAA.jitconfig.env"; )
+  run runner_prune_temp_dirs "${WR}"   # nothing tracked -> the env file is stale
+  [ "${status}" -eq 0 ]
+  [ ! -e "${WR}/jit-orphan.AAA.jitconfig.env" ]
+  rm -rf "${WR}"
+}
+
+@test "prune spares a tracked job's JIT credential env file" {
+  WR=$(mktemp -d)
+  ( umask 077; : >"${WR}/jit-live.BBB.jitconfig.env"; )
+  ( umask 077; : >"${WR}/jit-gone.CCC.jitconfig.env"; )
+  run runner_prune_temp_dirs "${WR}" live
+  [ "${status}" -eq 0 ]
+  [ -f "${WR}/jit-live.BBB.jitconfig.env" ]
+  [ ! -e "${WR}/jit-gone.CCC.jitconfig.env" ]
+  rm -rf "${WR}"
+}
+
+@test "prune removes only jit-*.jitconfig.env files, never other files" {
+  WR=$(mktemp -d)
+  touch "${WR}/jit-gone.DDD.log" "${WR}/other.jitconfig.env" "${WR}/keepme"
+  run runner_prune_temp_dirs "${WR}"
+  [ "${status}" -eq 0 ]
+  [ -f "${WR}/jit-gone.DDD.log" ]
+  [ -f "${WR}/other.jitconfig.env" ]
+  [ -f "${WR}/keepme" ]
+  rm -rf "${WR}"
+}
+
+@test "prune removes a stale env file symlink without following it" {
+  WR=$(mktemp -d)
+  OUTSIDE=$(mktemp -d)
+  touch "${OUTSIDE}/victim"
+  ln -s "${OUTSIDE}/victim" "${WR}/jit-evil.EEE.jitconfig.env"
+  run runner_prune_temp_dirs "${WR}"
+  [ "${status}" -eq 0 ]
+  [ ! -L "${WR}/jit-evil.EEE.jitconfig.env" ]
+  [ -f "${OUTSIDE}/victim" ]
+  rm -rf "${WR}" "${OUTSIDE}"
+}
+
 @test "prune is scoped to the work root: refuses a non-absolute root (#106)" {
   run runner_prune_temp_dirs "relative/path"
   [ "${status}" -ne 0 ]
