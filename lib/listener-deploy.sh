@@ -82,6 +82,12 @@ listener_deploy_paths() {
   LISTENER_LEGACY_UNIT_PATH="${LISTENER_UNIT_DIR}/${LISTENER_LEGACY_UNIT_NAME}"
   LISTENER_BIN="${LISTENER_PREFIX}/bin/scaleset-listener"
   LISTENER_ADMIN_BIN="${LISTENER_PREFIX}/bin/scaleset-admin"
+  # The CI-owned Docker GC (listener/docker-gc.sh): a shared oneshot service
+  # and the daily timer that starts it, one pair per host.
+  LISTENER_GC_SERVICE_NAME=scaleset-listener-gc.service
+  LISTENER_GC_TIMER_NAME=scaleset-listener-gc.timer
+  LISTENER_GC_SERVICE_PATH="${LISTENER_UNIT_DIR}/${LISTENER_GC_SERVICE_NAME}"
+  LISTENER_GC_TIMER_PATH="${LISTENER_UNIT_DIR}/${LISTENER_GC_TIMER_NAME}"
 }
 
 # The name becomes both a path component and a systemd instance identifier.
@@ -474,6 +480,62 @@ listener_deploy_template() (
     fi
   fi
 )
+
+# listener_deploy_gc <deploy-dir>: install the Docker GC service + daily timer
+# (rendered for this prefix and config dir) and enable the timer on a FIRST
+# install. A rerun respects an operator who turned it off with
+# `systemctl disable --now scaleset-listener-gc.timer`: an installed timer that
+# is disabled stays disabled, so the opt-out survives redeploys.
+listener_deploy_gc() (
+  local src=$1 rendered existed=0 prefix etc
+  rendered=$(mktemp -d)
+  trap 'rm -rf -- "${rendered}"' EXIT
+  [[ -f ${LISTENER_GC_TIMER_PATH} ]] && existed=1
+
+  prefix=$(printf '%s' "${LISTENER_PREFIX}" | sed 's/[\\&|]/\\&/g')
+  etc=$(printf '%s' "${LISTENER_ETC}" | sed 's/[\\&|]/\\&/g')
+  sed -e "s|^ExecStart=/opt/github-runner-listener/|ExecStart=${prefix}/|" \
+    -e "/^ExecStart=/s| --etc /etc/github-runner-listener\$| --etc ${etc}|" \
+    "${src}/${LISTENER_GC_SERVICE_NAME}" > "${rendered}/service"
+  cp -- "${src}/${LISTENER_GC_TIMER_NAME}" "${rendered}/timer"
+
+  if listener_unit_current "${rendered}/service" "${LISTENER_GC_SERVICE_PATH}"; then
+    echo "  docker GC unit:   ${LISTENER_GC_SERVICE_PATH} already current, skipped"
+  else
+    listener_install_unit "${rendered}/service" "${LISTENER_GC_SERVICE_PATH}"
+  fi
+  if listener_unit_current "${rendered}/timer" "${LISTENER_GC_TIMER_PATH}"; then
+    echo "  docker GC timer:  ${LISTENER_GC_TIMER_PATH} already current, skipped"
+  else
+    listener_install_unit "${rendered}/timer" "${LISTENER_GC_TIMER_PATH}"
+  fi
+
+  if (( existed )) && ! listener_unit_enabled "${LISTENER_GC_TIMER_NAME}"; then
+    echo "  docker GC:        ${LISTENER_GC_TIMER_NAME} left disabled (sudo systemctl enable --now ${LISTENER_GC_TIMER_NAME} to turn it on)"
+    return 0
+  fi
+  listener_enable_unit "${LISTENER_GC_TIMER_NAME}"
+  if ! listener_unit_active "${LISTENER_GC_TIMER_NAME}"; then
+    _systemctl start "${LISTENER_GC_TIMER_NAME}"
+  fi
+  echo "  docker GC:        ${LISTENER_GC_TIMER_NAME} runs daily; turn it off with: sudo systemctl disable --now ${LISTENER_GC_TIMER_NAME}"
+)
+
+# listener_remove_gc: stop + disable the Docker GC timer and remove both unit
+# files. Returns 0 when it removed a file (so the caller reloads systemd), 1
+# when nothing was installed.
+listener_remove_gc() {
+  local removed=1 path
+  listener_stop_disable_unit "${LISTENER_GC_TIMER_NAME}"
+  for path in "${LISTENER_GC_TIMER_PATH}" "${LISTENER_GC_SERVICE_PATH}"; do
+    if [[ -e ${path} || -L ${path} ]]; then
+      rm -- "${path}"
+      echo "  removed unit:     ${path}"
+      removed=0
+    fi
+  done
+  return "${removed}"
+}
 
 listener_unit_enabled() { _systemctl is-enabled "$1" >/dev/null 2>&1; }
 listener_unit_active()  { _systemctl is-active  "$1" >/dev/null 2>&1; }

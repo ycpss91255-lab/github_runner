@@ -178,6 +178,7 @@ main() {
   fi
   if (( remove_shared )); then
     echo "  Remove template:  ${LISTENER_UNIT_PATH}"
+    echo "  Remove docker GC: ${LISTENER_GC_TIMER_NAME} + ${LISTENER_GC_SERVICE_NAME} (stop, disable, delete)"
     echo "  Remove prefix:    ${LISTENER_PREFIX}"
   else
     # A remaining instance may still need the service account.
@@ -225,6 +226,9 @@ main() {
     echo "  removed state:    ${LISTENER_RUNNER_HOME}"
   fi
   if (( remove_shared )); then
+    if listener_remove_gc; then
+      reload=1
+    fi
     if [[ -e ${LISTENER_UNIT_PATH} || -L ${LISTENER_UNIT_PATH} ]]; then
       rm -- "${LISTENER_UNIT_PATH}"
       echo "  removed template: ${LISTENER_UNIT_PATH}"

@@ -89,6 +89,20 @@ first diagnostic command, and a fix. All commands run from the repo checkout
   tight, the culprit is usually a large `_work/<job-id>` — verify no job is
   running on that runner, then remove the specific job dir manually. Schedule
   recurring cleanup with `./script/schedule-cleanup.sh`.
+- **Listener hosts with Docker socket jobs:** the space usually goes to Docker,
+  not `_work`. Diagnose with `docker system df` and
+  `docker image ls --digests ghcr.io/ycpss91255-lab/runner-cpu` (old runner
+  images pulled by digest are never dangling, so `docker image prune` leaves
+  them). The daily `scaleset-listener-gc.timer` removes unconfigured, unused,
+  digest-only CI runner images and empty `github_runner_default`-style compose
+  networks older than 24h. Preview with
+  `sudo /opt/github-runner-listener/listener/docker-gc.sh` (dry run by default),
+  act with `--apply`, check `journalctl -u scaleset-listener-gc.service`.
+  Every removal logs a `restore: docker pull <repo>@<digest>` line. Turn the
+  timer off with `sudo systemctl disable --now scaleset-listener-gc.timer`.
+  The GC never touches volumes, buildx builders, the daemon build cache, other
+  users' images or GitLab runner objects: reclaiming those is out of scope for
+  CI and needs the host owner's approval. See deploy/README.md section 5.
 
 ### `gh` auth expired (mutating commands fail up front)
 

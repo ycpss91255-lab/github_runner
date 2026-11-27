@@ -8,6 +8,17 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Daily Docker GC of CI residue on listener hosts.** `listener/docker-gc.sh`
+  removes runner images of the CI repositories that were pulled by digest,
+  are not pinned by any runner-type config and are used by no container, and
+  empty `<project>_default` compose networks (at least `github_runner_default`)
+  older than 24h. It is a dry run unless `--apply` is passed, and logs one line
+  per removal with a restore command. `script/deploy-listener.sh` installs and
+  enables `scaleset-listener-gc.timer` (opt out with `--no-docker-gc`, or turn
+  it off with `systemctl disable --now scaleset-listener-gc.timer`, which a
+  redeploy respects), and teardown removes it. Volumes, builders, the daemon
+  build cache, other users' images and GitLab runner objects are never touched;
+  reclaiming those needs the host owner's approval.
 - **Opt-in Docker check in the self-hosted smoke workflow.** Dispatch
   `selfhosted-smoke.yaml` with `-f docker=true` on a `docker_socket` runner
   type to prove the job reaches the host daemon: `docker run` with same-path
