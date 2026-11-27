@@ -79,6 +79,9 @@ admission*.
   Image builds use a daemonless rootless builder (**Kaniko / BuildKit-rootless /
   Buildah**). Jobs that genuinely need an inner daemon use **Sysbox** or rootless
   DinD-in-container.
+  A type that opts in with `docker_socket` also gets its per-job work folder
+  mounted at the same absolute path, so the host daemon can resolve workspace
+  bind mounts (#142).
 - **Per-type sandbox knobs**: stronger isolation runtimes (**gVisor / Kata
   microVM**) and **userns-remap** are available as per-runner-type escalations
   for genuinely untrusted CPU runners (Kata is the lightweight path back to

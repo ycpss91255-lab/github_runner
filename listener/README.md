@@ -140,9 +140,11 @@ their installed paths under `${LISTENER_PREFIX}/listener`. Reruns backfill absen
 or empty settings in the mode-0600 environment file and replace effective
 relative script paths. Absolute script overrides are preserved.
 
-The bash seams read a few more knobs at provision/reap time:
-`RUNNER_WORK_ROOT` (parent of the per-job temp dir, default `${RUNNER_HOME}/work`
-— #130; reap.sh prunes the **same** root, #148),
+The listener and its shell entrypoints share `RUNNER_WORK_ROOT`, which defaults
+to `${RUNNER_HOME}/work` (#130/#148). In the standard installation,
+`RUNNER_HOME` defaults to the `runners` directory under the install prefix.
+For custom binary and script locations, set `RUNNER_HOME` or
+`RUNNER_WORK_ROOT` to an absolute path. The bash seams also read
 `RUNNER_JOB_MAX_LIFETIME` (per-job watchdog ceiling in seconds, default 6h, 0
 disables, #107), and `RUNNER_MANAGED_BY` (the `managed-by` label value the
 reaper keys on, #104/#105). The history ledger defaults to
@@ -162,20 +164,21 @@ runner-type config (the shell-out contract, ADR-0003):
 | `RUNNER_DEVICES` | space/newline-separated host device nodes passed through precisely as `--device` -- never `--privileged` (#117) |
 | `RUNNER_CONTAINER_HOME` | the runner's home inside the image, used as the container's working directory (default `/home/runner`); set it only for an image that installs the runner elsewhere |
 | `RUNNER_DOCKER_SOCKET` | Host Docker socket path from the runner type's `docker_socket` setting. Explicitly empty when the type leaves access off (#116). |
+| `RUNNER_JOB_WORKDIR` | Absolute same-path work folder chosen by the listener for a socket job. Explicitly empty for other jobs. |
 
 Fixed (not knobs): `--cap-drop=ALL` and `--security-opt no-new-privileges` are
 always applied; the **default seccomp profile is kept** (never
 `seccomp=unconfined`) and **MAC stays enforced** -- there is no `label=disable`,
-and any bind mount (only the opt-in docker socket) is relabelled `:Z` (#115).
+and the opt-in socket and work directory mounts are relabelled `:Z` (#115).
 The container is **never `--privileged`**.
 
-**No host directory is mounted into a job.** The container runs the runner the
-image ships at `RUNNER_CONTAINER_HOME` (default `/home/runner`, the layout of
-both `images/runner-base.Dockerfile` and `ghcr.io/actions/actions-runner`) as
-its working directory. The job's `_work` and `_diag` live in the container's own
-writable layer and are removed with it by `--rm`. The per-job host dir under the
-work root is only bookkeeping: it anchors the credential env-file, which sits
-beside it rather than inside it (#140), and it is what the reaper sweeps.
+The container runs from the image's `RUNNER_CONTAINER_HOME` (default
+`/home/runner`). For types with socket access off, the job has no host directory
+mount and `_work` lives in the container's writable layer. Socket-enabled types
+mount exactly one host directory at the same path inside and outside the
+container. It serves as the runner's work folder and is removed at job exit
+or by the orphan sweep. In both modes, `_diag` and `/tmp` are container-private
+and the credential env-file sits beside the per-job directory (#140).
 
 ### Host Docker socket opt-in (#116)
 
@@ -197,13 +200,11 @@ are expected to be gated by the organization's approval policy
 
 Containers started by a job are siblings on the host daemon. The daemon resolves
 `docker run -v <path>:...` and Compose bind mounts on the host filesystem.
-The job's checkout under `_work` exists only inside the job container because
-the job has no host directory mounted. Avoid both relative and absolute bind
-mounts of that workspace. Use `docker build` with a workspace context, which
-the CLI streams to the daemon, or stream a build context on stdin and use
-`COPY` in the Dockerfile. Use named volumes for shared data and `docker cp`
-to copy files into or out of containers, including a container that mounts a
-named volume you want to populate.
+The listener mints the runner with an absolute work folder under
+`RUNNER_WORK_ROOT` (default `RUNNER_HOME/work`), so paths under
+`GITHUB_WORKSPACE` and `RUNNER_TEMP` resolve on the host as well as in the job.
+The work directory is writable by the runner and sibling container users.
+The service-owned work root restricts traversal by other host users.
 
 ### Daemonless image builds (#118/#119)
 

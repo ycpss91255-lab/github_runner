@@ -154,10 +154,13 @@ Docker daemon. The listener passes an explicit empty value for types that leave
 access off. For an opted-in type, the provisioner mounts the socket with `:Z`,
 adds its host GID with `--group-add`, and keeps the other hardening flags.
 Fork PRs are expected to be gated by
-`approval_policy=all_external_contributors`. Job-started containers resolve bind
-mounts on the host, where the job checkout is unavailable. See the
-[listener README](../listener/README.md#host-docker-socket-opt-in-116) for
-details and ways to transfer workspace files.
+`approval_policy=all_external_contributors`. The provisioner also mounts a
+per-job work folder at the same absolute path on the host and in the job.
+It lives at `/opt/github-runner-listener/runners/work/jit-<job-id>.<random>` by
+default, under the unit's `ReadWritePaths`. This lets the host daemon resolve
+Compose bind mounts of the job checkout. The work folder is removed at job exit
+or by the orphan sweep. See the
+[listener README](../listener/README.md#host-docker-socket-opt-in-116) for details.
 
 ## 2a. Create the writable runner state tree for a manual single-unit install
 

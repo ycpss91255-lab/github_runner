@@ -16,6 +16,8 @@ type ScriptReaper struct {
 	// Script is the path to reap.sh. Defaults to the sibling script next to the
 	// listener binary when empty.
 	Script string
+	// Image is the runner type image used to purge protected orphan entries.
+	Image string
 }
 
 // Reap runs one orphan sweep, passing the tracked job ids so their containers
@@ -28,6 +30,7 @@ func (r *ScriptReaper) Reap(ctx context.Context, tracked []string) error {
 		script = "reap.sh"
 	}
 	cmd := exec.CommandContext(ctx, script, tracked...)
+	cmd.Env = append(os.Environ(), "RUNNER_PURGE_IMAGE="+r.Image)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
