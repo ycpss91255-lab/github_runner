@@ -772,3 +772,45 @@ _assert_migration_failure_note() {
   ! grep -qE 'instance-secret|legacy-secret' "${CAP}" || false
   [[ "${output}" != *"instance-secret"* && "${output}" != *"legacy-secret"* ]]
 }
+
+# --- docker GC timer ----------------------------------------------------------
+
+@test "a full run installs the docker GC service and timer and enables the timer" {
+  run _deploy
+  [ "${status}" -eq 0 ]
+  [ -f "${LISTENER_UNIT_DIR}/scaleset-listener-gc.service" ]
+  [ -f "${LISTENER_UNIT_DIR}/scaleset-listener-gc.timer" ]
+  grep -qxF "ExecStart=${PREFIX}/listener/docker-gc.sh --apply --etc ${ETC}" \
+    "${LISTENER_UNIT_DIR}/scaleset-listener-gc.service"
+  _systemctl_called enable scaleset-listener-gc.timer
+  _systemctl_called start scaleset-listener-gc.timer
+  [[ "${output}" == *"systemctl disable --now scaleset-listener-gc.timer"* ]]
+}
+
+@test "a rerun leaves a docker GC timer the operator disabled disabled" {
+  run _deploy
+  [ "${status}" -eq 0 ]
+  rm -f "${STUB_STATE}/scaleset-listener-gc.timer.enabled" "${STUB_STATE}/scaleset-listener-gc.timer.started"
+  : > "${CAP}"
+  run _deploy
+  [ "${status}" -eq 0 ]
+  ! _systemctl_called enable scaleset-listener-gc.timer || false
+  ! _systemctl_called start scaleset-listener-gc.timer || false
+  [[ "${output}" == *"scaleset-listener-gc.timer left disabled"* ]]
+}
+
+@test "--no-docker-gc deploys without the docker GC timer" {
+  run _deploy --no-docker-gc
+  [ "${status}" -eq 0 ]
+  [ ! -e "${LISTENER_UNIT_DIR}/scaleset-listener-gc.service" ]
+  [ ! -e "${LISTENER_UNIT_DIR}/scaleset-listener-gc.timer" ]
+  ! _systemctl_called enable scaleset-listener-gc.timer || false
+}
+
+@test "the dry-run plan names the docker GC timer and installs nothing" {
+  run bash -c "'${SCRIPT}' --dry-run --config '${CONFIG}' --type gpu \
+    --org-url https://github.com/acme --prefix '${PREFIX}' --etc '${ETC}'" </dev/null
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"scaleset-listener-gc.timer"* ]]
+  [ ! -e "${LISTENER_UNIT_DIR}/scaleset-listener-gc.timer" ]
+}

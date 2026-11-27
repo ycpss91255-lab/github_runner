@@ -284,3 +284,42 @@ EOF
   [ -f "${ETC}/runner-types-gpu.yaml" ]
   [ ! -s "${CAP}" ]
 }
+
+# --- docker GC timer ----------------------------------------------------------
+
+_seed_gc_timer() {
+  printf '[Service]\n' > "${UNIT_DIR}/scaleset-listener-gc.service"
+  printf '[Timer]\n' > "${UNIT_DIR}/scaleset-listener-gc.timer"
+  : > "${STUB_STATE}/scaleset-listener-gc.timer.started"
+  : > "${STUB_STATE}/scaleset-listener-gc.timer.enabled"
+}
+
+@test "whole-host teardown stops, disables and removes the docker GC timer" {
+  _seed_gc_timer
+  run _teardown_run
+  [ "${status}" -eq 0 ]
+  grep -A1 -xF 'stop' "${CAP}" | grep -qxF scaleset-listener-gc.timer
+  grep -A1 -xF 'disable' "${CAP}" | grep -qxF scaleset-listener-gc.timer
+  [ ! -e "${UNIT_DIR}/scaleset-listener-gc.service" ]
+  [ ! -e "${UNIT_DIR}/scaleset-listener-gc.timer" ]
+  grep -qxF 'daemon-reload' "${CAP}"
+  [[ "${output}" == *"scaleset-listener-gc.timer"* ]]
+}
+
+@test "typed teardown keeps the docker GC timer while another instance remains" {
+  _seed_instances
+  _seed_gc_timer
+  run _teardown_run --type cpu
+  [ "${status}" -eq 0 ]
+  [ -f "${UNIT_DIR}/scaleset-listener-gc.timer" ]
+  [ -f "${UNIT_DIR}/scaleset-listener-gc.service" ]
+  ! grep -qxF scaleset-listener-gc.timer "${CAP}" || false
+}
+
+@test "teardown dry run previews the docker GC timer removal and removes nothing" {
+  _seed_gc_timer
+  run _teardown_run --dry-run
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"scaleset-listener-gc.timer"* ]]
+  [ -f "${UNIT_DIR}/scaleset-listener-gc.timer" ]
+}
