@@ -100,14 +100,20 @@ runner_types:
   # (no device stack), so it uses the stock image directly -- the digest pin is
   # the supply-chain guarantee here (the published image is what you ran).
   #
-  # Bump the digest deliberately (no floating tag drift):
-  #   docker buildx imagetools inspect ghcr.io/actions/actions-runner:latest
-  #   # copy the top-level "Digest: sha256:..." and paste it below, then commit.
-  # (Pin against the version you have validated, not whatever :latest moved to.)
+  # Bump the digest deliberately using a validated version:
+  #   docker buildx imagetools inspect ghcr.io/actions/actions-runner:2.338.2
+  #   # Copy the top-level "Digest: sha256:..." into the image field below.
+  # Under GitHub's 30-day cutoff, dispatch stops for runners with auto-update
+  # off once a newer release has been available for more than 30 days. A stale
+  # pin can show "Listening for Jobs" while jobs stay queued.
+  # Bump the digest, the version comment, and RUNNER_VERSION_FALLBACK in
+  # lib/runner-release.sh together. test/bats/unit/runner_image_pin.bats
+  # checks that they agree.
   - name: cpu
     scale_set: cpu-runners
     labels: [self-hosted, linux, x64, cpu]
-    image: ghcr.io/actions/actions-runner@sha256:08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29
+    # actions-runner 2.338.2 (pin the version together with the digest)
+    image: ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300
     # Enable only for trusted jobs that need the host Docker daemon.
     # docker_socket: /var/run/docker.sock
     # Reactive live-admission (ADR-0005, #163): the listener admits each job

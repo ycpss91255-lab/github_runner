@@ -13,6 +13,21 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs, and Compose. This grants root-equivalent host access. The provisioner
   adds the socket target's host GID even for symlinked paths and retains baseline
   container hardening. Socket access defaults to off for every type.
+- **Deploy several runner types on one host.** `script/deploy-listener.sh`
+  installs a shared systemd template and starts one instance per runner type.
+  Each instance has its own 0600 environment file and writable runner state
+  tree, and the container reaper defaults to a per-type `RUNNER_MANAGED_BY`
+  label value. Deploying the type served by a legacy single-unit listener
+  migrates it and reuses its token when the per-type file is absent.
+  Deploy selects the type from `--type` or the sole config entry. Scripts
+  that previously set `RUNNER_TYPE` to select a type must pass `--type`.
+  `script/teardown-listener.sh --type <name>` removes one instance and its
+  generated config while keeping the shared installation for other listeners.
+  Whole-host teardown removes all generated per-type configs. Replacing the
+  shared template restarts the other active listener instances after systemd
+  reloads it. The names `work`, `history` and `scaleset-listener` are reserved
+  to protect legacy state paths and the legacy environment file. The migration
+  guide explains how to retain the legacy history ledger.
 
 - **CI builds and publishes the self-built runner images to ghcr.io.** The new
   `runner images` workflow builds `ghcr.io/ycpss91255-lab/runner-base` and
@@ -97,6 +112,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are: they record what was true when they were written.
 
 ### Fixed
+
+- **Pin the sample CPU image and runner release fallback to 2.338.2.**
+  The previously pinned 2.335 runner could log "Listening for Jobs" while
+  jobs stayed queued because GitHub stopped dispatching to the stale runner
+  with self-update disabled. The deployment guide explains how to refresh the
+  CPU pin and rebuild the GPU image.
 
 - **The scale-set listener avoids the 404 from acquiring request ID 0.**
   It acquires valid available request IDs in one batch after acknowledging the
