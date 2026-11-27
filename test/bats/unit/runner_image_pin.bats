@@ -14,9 +14,9 @@ setup() {
   CHANGELOG="${ROOT}/doc/changelog/CHANGELOG.md"
   CURRENT_VERSION="2.338.2"
   STOCK_CPU_IMAGE="ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
-  PUBLISHED_CPU_IMAGE="ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f"
+  PUBLISHED_CPU_IMAGE="ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934"
   # gpu-runner 2.338.2 as published by the runner images workflow.
-  PUBLISHED_GPU_IMAGE="ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d"
+  PUBLISHED_GPU_IMAGE="ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8"
 }
 
 # Print the CPU image and its immediately preceding line.

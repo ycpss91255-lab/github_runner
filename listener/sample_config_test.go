@@ -104,7 +104,7 @@ func TestCPUTypeImagePinnedToCurrentRunner(t *testing.T) {
 		t.Fatalf("load sample: %v", err)
 	}
 	// The published runner-cpu image (actions-runner 2.338.2 + Docker Compose).
-	const publishedImage = "ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f"
+	const publishedImage = "ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934"
 	for _, rt := range types {
 		if rt.Name == "cpu" {
 			if rt.Image != publishedImage {
@@ -123,7 +123,7 @@ func TestGPUTypeImagePinnedToPublishedImage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load sample: %v", err)
 	}
-	const publishedImage = "ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d"
+	const publishedImage = "ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8"
 	for _, rt := range types {
 		if rt.Name == "gpu" {
 			if rt.Image != publishedImage {

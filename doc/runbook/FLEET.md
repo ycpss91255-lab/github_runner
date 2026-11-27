@@ -18,7 +18,7 @@ daemon.
 ### cpu type
 
 Scale set `cpu`, labels `[self-hosted, linux, x64, cpu]`, image
-`ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f`.
+`ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934`.
 
 | host | address / id | size | runner group | notes |
 |---|---|---|---|---|
@@ -32,8 +32,9 @@ Scale set `cpu`, labels `[self-hosted, linux, x64, cpu]`, image
 ### gpu type
 
 Scale set `gpu`, labels `[self-hosted, linux, x64, gpu, cuda]`, image
-`ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d`
-(actions-runner 2.338.2, docker CLI with Compose and Buildx).
+`ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8`
+(actions-runner 2.338.2, docker CLI with Compose and Buildx). Both images carry
+the baseline host tools (PR #161).
 
 | host | id | GPU | runner group | notes |
 |---|---|---|---|---|
@@ -105,10 +106,18 @@ sudo systemctl disable --now scaleset-listener-gc.timer   # a redeploy respects 
 - **Listener tokens are personal `gh` OAuth tokens**, and a `docker_socket`
   job can read them (the socket is root-equivalent). The owner deferred the fix
   (a dedicated GitHub App or scoped credentials) to the k3s migration.
-- **The classic runner `C01013328-ycpss91255-docker-org` is disabled but still
-  registered.** Its service on the 5090 host is stopped and disabled, and kept
-  as the restore fallback (restore log); unregister it once the gpu listener
-  has proven itself.
+- **A `docker_socket` job's root-owned files make the per-job workdir purge
+  noisy.** Files a job creates through the host Docker daemon are owned by
+  root, so the purge of the job's workdir logs many "Permission denied" lines
+  before the fallback purge removes them. The purge succeeds; the log is only
+  noisy, not failing.
+
+## Removed
+
+- **The classic runner `C01013328-ycpss91255-docker-org` is removed.** Its
+  registration was deleted on 2026-11-28; its service on the 5090 host is
+  disabled and its files are kept (restore log). The 5090 host serves gpu jobs
+  only through `scaleset-listener@gpu`.
 
 ## Restore log
 
@@ -151,3 +160,6 @@ the command that undoes it. Paths without a directory are in
 | ada2000 | gpu: scale set `gpu-ada2000-001` (32) -> `gpu` in `ci-ada2000-001` (38); added the cpu type: `cpu` in `ci-ada2000-001` (39), runner-cpu image, `docker_socket`, reserve 30 | `runner-types.yaml.bak-before-group`, `.bak-before-cpu` | gpu as the row above with `--type gpu`; cpu: `./script/teardown-listener.sh --type cpu`, `scaleset-admin delete --type cpu --yes`, restore `.bak-before-cpu` |
 | org | created runner group `ci-5090` (12, visibility all) for the 5090 host | n/a | `gh api -X DELETE orgs/ycpss91255-lab/actions/runner-groups/12` |
 | 5090 (C01013328) | classic runner service disabled and stopped (still registered); gpu listener `scaleset-listener@gpu`, scale set `gpu` in `ci-5090`, `gpu-runner@sha256:9d3799...`, `docker_socket` | `runner-types.yaml` (new) | `sudo systemctl disable --now scaleset-listener@gpu`; `sudo ./script/teardown-listener.sh --type gpu`; `sudo systemctl enable --now actions.runner.ycpss91255-docker.C01013328-ycpss91255-docker-org.service` |
+| nuc-002 | owner-requested full Docker purge: removed all images (`nuc/*` dev images, 207G), all build cache (77G), the buildx builder `buildx_buildkit_template-system0` and its volume, unused volumes and networks; re-pulled runner-cpu | none | **not restorable**: rebuild the `nuc/*` images from their repos |
+| kai, samuel, nuc-002..004, ada2000, 5090 | images repinned for the baseline host tools (PR #161): `runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934`, `gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8`; listeners restarted when idle | `runner-types.yaml.bak-before-tools` | `sudo cp runner-types.yaml.bak-before-tools runner-types.yaml && sudo systemctl restart scaleset-listener@<type>` |
+| org | deleted the classic runner registration `C01013328-ycpss91255-docker-org` (id 142); its service on the 5090 host stays disabled, files kept | n/a | re-register it on the 5090 host with `./script/add-runner.sh --persistent org ycpss91255-lab` (legacy systemd path), then `sudo systemctl enable --now actions.runner.ycpss91255-docker.C01013328-ycpss91255-docker-org.service` |

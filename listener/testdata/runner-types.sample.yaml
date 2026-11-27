@@ -98,7 +98,7 @@ runner_types:
     # workflow's job summary. To use your own build, push it to your registry
     # and pin that digest instead.
     # actions-runner 2.338.2
-    image: ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d
+    image: ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8
     devices:
       - /dev/nvidia0
       - /dev/nvidiactl
@@ -131,7 +131,7 @@ runner_types:
     # runner_group: ci-<host>
     labels: [self-hosted, linux, x64, cpu]
     # actions-runner 2.338.2
-    image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f
+    image: ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934
     # Enable only for trusted jobs that need the host Docker daemon.
     # docker_socket: /var/run/docker.sock
     # Reactive live-admission (ADR-0005, #163): the listener admits each job

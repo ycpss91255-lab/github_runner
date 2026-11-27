@@ -142,6 +142,16 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Sample runner images carry the baseline host tools.** Both sample types in
+  `deploy/runner-types.sample.yaml` (and its listener testdata copy) now pin
+  the images published with the baseline host tools (#161):
+  `ghcr.io/ycpss91255-lab/runner-cpu@sha256:15a5cc68b51769a21e35b641328a6a329a6a9f5533ca7eb42b7b47ba37749934`
+  and
+  `ghcr.io/ycpss91255-lab/gpu-runner@sha256:2846d90a90e9e9bc7b4baecd856600445786d9bd2af63297ebd167910e467cd8`
+  (actions-runner 2.338.2). The fleet runbook records the repin on every
+  host, the removal of the classic 5090 runner, and the noisy workdir purge
+  after `docker_socket` jobs as a known open item.
+
 - **Sample gpu type pins the published gpu-runner image.** The gpu entry in
   `deploy/runner-types.sample.yaml` now pins
   `ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d`
