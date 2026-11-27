@@ -99,6 +99,41 @@ teardown() { rm -rf "${FAKE_RH}" "${STUB}"; }
   case "${incmd}" in *ENCODEDxJITxSECRETx==*) echo "in-container argv: ${incmd}"; return 1 ;; esac
 }
 
+# --- run.sh must be started where the image put it, not from an empty mount ---
+# The runner is baked into the image at /home/runner (images/runner-base.Dockerfile
+# WORKDIR, and the official ghcr.io/actions/actions-runner layout). The seam used
+# to bind the fresh, EMPTY per-job host dir over /runner and `-w /runner`, so the
+# in-container `./run.sh` found nothing: every job died with
+# `sh: 1: ./run.sh: not found` (rc 127). The host dir is also 0700 and owned by
+# the service user while the container runs as uid 1001, so the job could not
+# have written to it even if run.sh had been there.
+
+@test "runner_container_run starts ./run.sh from the image's runner home (/home/runner)" {
+  make_cli docker
+  run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
+  [ "${status}" -eq 0 ]
+  # The working directory is the image's runner home, where run.sh lives.
+  wd=$(grep -A1 -xF -- '-w' "${CAP}" | tail -n1)
+  [ "${wd}" = "/home/runner" ]
+  # The in-container command is still the bare ./run.sh (no credential, #155).
+  incmd=$(grep -A1 -xF -- '-c' "${CAP}" | tail -n1)
+  [ "${incmd}" = "./run.sh" ]
+}
+
+@test "runner_container_run does NOT bind the empty per-job host dir into the container" {
+  make_cli docker
+  run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
+  [ "${status}" -eq 0 ]
+  # No mount may cover the runner home (that would hide run.sh again), and the
+  # per-job host dir is not mounted anywhere: the job's state lives only in the
+  # container's own writable layer, which --rm destroys with it.
+  ! grep -qF -- "${RUNNER_DIR}:" "${CAP}" || false
+  ! grep -qE -- ':/runner(:|$)' "${CAP}" || false
+  ! grep -qE -- ':/home/runner(/|:|$)' "${CAP}" || false
+  # With no opt-in mounts configured, there is no -v at all.
+  ! grep -qxF -- '-v' "${CAP}" || false
+}
+
 # --- #136 the JIT credential must NEVER land on the HOST podman/docker argv ---
 
 @test "runner_container_run keeps the JIT config OFF the host container CLI argv (#136)" {

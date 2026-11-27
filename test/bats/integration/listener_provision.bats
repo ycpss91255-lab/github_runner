@@ -157,6 +157,20 @@ teardown() { rm -rf "${WORK}" "${STUB}"; }
 
 # --- per-job work root defaults under RUNNER_HOME (SEC-3 chokepoint, #130) ---
 
+@test "provision-job.sh runs the job from the image's runner home, with no host dir mounted over it" {
+  # The per-job runner dir is a fresh, empty mktemp dir (0700, owned by the
+  # service user). Binding it over the container's working directory hid the
+  # image's bundled run.sh and every job died with `./run.sh: not found`.
+  jf=$(jit_file ENC)
+  run "${SCRIPT}" job-wd "${jf}" ghcr.io/acme/runner:latest
+  [ "${status}" -eq 0 ]
+  wd=$(grep -A1 -xF -- '-w' "${CAP}" | tail -n1)
+  [ "${wd}" = "/home/runner" ]
+  [ "$(grep -A1 -xF -- '-c' "${CAP}" | tail -n1)" = "./run.sh" ]
+  ! grep -qE -- "^${RUNNER_WORK_ROOT}/jit-job-wd\.[^/]*:" "${CAP}" || false
+  ! grep -qxF -- '-v' "${CAP}" || false
+}
+
 @test "provision-job.sh defaults the per-job work root under RUNNER_HOME, not /tmp (#130)" {
   # With RUNNER_WORK_ROOT unset, the per-job runner dir must be created under
   # RUNNER_HOME/work (the SEC-3 rm-root chokepoint) rather than scattered in
