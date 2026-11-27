@@ -1,12 +1,9 @@
 // Package listener is the provisioning glue between the official Runner Scale
 // Set Client (github.com/actions/scaleset, ADR-0001 Phase 4) and the per-job
 // container provisioner (lib/runner-container.sh, Phase 3). The GitHub client
-// owns the outbound long-poll scale-set session protocol; this package owns
-// only the glue: it reads demand (Statistics.TotalAssignedJobs) off each
-// message, and for every ASSIGNED job it shells out to the Phase 3 provisioner
-// to run that job in a fresh, single-use, rootless container. It decides
-// nothing about *when / how many* runners (that is the scale set's job) -- it
-// supplies the isolation the scale set client does not.
+// owns the outbound long-poll scale-set session protocol. This package
+// reconciles Statistics.TotalAssignedJobs against the local runner pool and
+// starts single-use, rootless containers for GitHub to dispatch jobs to.
 package listener
 
 import (
@@ -21,6 +18,7 @@ import (
 	"unicode"
 
 	"github.com/actions/scaleset"
+	"github.com/google/uuid"
 )
 
 // defaultReapInterval is how often the periodic orphan sweep runs (#105) when
@@ -51,8 +49,7 @@ const defaultCapacityReportInterval = 30 * time.Second
 // proves the real client satisfies it, so the two are interchangeable.
 type Session interface {
 	// GetMessage long-polls for the next scale-set message, reporting the
-	// listener's current spare capacity (maxCapacity) so GitHub never assigns
-	// more jobs than we can provision.
+	// resolved runner pool bound as maxCapacity.
 	GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error)
 	// AcquireJobs claims available request IDs for this session.
 	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
@@ -187,8 +184,7 @@ type Config struct {
 	// seam (#119). Empty = none.
 	BuildTool string
 	// MaxRunners is the worker-pool bound: the ceiling on concurrently-
-	// provisioned runners and the basis for locally-derived capacity (#102 --
-	// capacity reported to GitHub is this bound minus the local in-flight count).
+	// provisioned runners and the max capacity advertised to GitHub.
 	// Zero falls back to defaultPoolBound. When DeviceDetector is set (#103) the
 	// detected device count overrides this.
 	MaxRunners int
@@ -298,18 +294,17 @@ func resolveBound(cfg Config) int {
 	return defaultPoolBound
 }
 
-// Listen polls for messages with locally derived spare capacity. It acknowledges
-// each envelope before acquiring its available jobs in one bounded request,
-// even during shutdown. While active, it admits each assignment to the worker
-// pool before minting its JIT config and dispatching it. Mint errors end Listen;
-// provisioning failures are reported per job. On exit, Listen drains workers
-// and closes the session.
+// Listen advertises the resolved pool bound on every poll. It reconciles
+// assigned demand at startup, on messages with statistics, and on empty polls.
+// It acknowledges each envelope before acquiring its available jobs in one
+// bounded request, even during shutdown. New runners pass local admission before
+// minting and dispatch. Mint errors end Listen; provisioning failures are
+// reported per runner. On exit, Listen drains workers and closes the session.
 func (l *Listener) Listen(ctx context.Context) (err error) {
 	defer func() {
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
 			err = nil
 		}
-		l.wg.Wait()
 		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
 		closeErr := l.session.Close(closeCtx)
@@ -322,14 +317,24 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 	// crash before we begin (nothing is tracked yet, so all are orphans), then
 	// start the periodic sweep. stopReaper joins the periodic goroutine on exit.
 	l.reap(ctx)
-	stopReaper := l.startReaper(ctx)
-	defer stopReaper()
+	backgroundCtx, stopBackground := context.WithCancel(ctx)
+	stopReaper := l.startReaper(backgroundCtx)
 
 	// Periodic capacity/in-flight reporting (#131): emit a structured snapshot of
 	// pool occupancy on an interval for the journald audit sink. stopReporter
 	// joins the goroutine on exit. No-op when no JobLogger is configured.
-	stopReporter := l.startCapacityReporter(ctx)
-	defer stopReporter()
+	stopReporter := l.startCapacityReporter(backgroundCtx)
+	defer func() {
+		l.wg.Wait()
+		stopBackground()
+		stopReporter()
+		stopReaper()
+	}()
+
+	latest := l.session.Session().Statistics
+	if err := l.reconcile(ctx, latest, nil); err != nil {
+		return err
+	}
 
 	lastMessageID := 0
 
@@ -338,19 +343,17 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 			return cerr
 		}
 
-		// Capacity is LOCAL: the pool bound less the jobs currently in-flight on
-		// THIS host (#102). It is not the server's TotalAssignedJobs -- reported
-		// headroom must reflect what we can actually run, and it updates as jobs
-		// start and finish.
-		capacity := l.capacityFor(int(l.inFlight.Load()))
-		msg, gerr := l.session.GetMessage(ctx, lastMessageID, capacity)
+		// The protocol gets the pool ceiling. Live headroom gates dispatch
+		// locally and is recorded separately in capacity snapshots.
+		msg, gerr := l.session.GetMessage(ctx, lastMessageID, l.bound)
 		if gerr != nil {
-			// The loop terminates ONLY on context cancellation (shutdown /
-			// SIGTERM). Every other GetMessage error is a genuine
-			// transport/session failure and is fatal -- surfaced as-is.
+			// Non-cancellation poll errors end the session and surface to the caller.
 			return gerr
 		}
 		if msg == nil {
+			if err := l.reconcile(ctx, latest, nil); err != nil {
+				return err
+			}
 			continue
 		}
 
@@ -361,8 +364,11 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 		if err := l.acquire(ctx, msg.JobAvailableMessages); err != nil {
 			return err
 		}
-		if err := l.provision(ctx, msg.JobAssignedMessages); err != nil {
-			return err
+		if msg.Statistics != nil {
+			latest = msg.Statistics
+			if err := l.reconcile(ctx, latest, msg.JobAssignedMessages); err != nil {
+				return err
+			}
 		}
 	}
 }
@@ -406,10 +412,17 @@ func (l *Listener) releaseAssignment(rawJobID string) {
 	l.assignedMu.Unlock()
 }
 
-// provision reserves the envelope's unique assignments, then mints and
-// dispatches each one once a worker slot is available. Workers own their
-// reservations after dispatch; shutdown or a mint failure releases the rest.
-func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) error {
+// reconcile takes one snapshot of the shortfall. Workers count from dispatch
+// through exit, including any time the runner spends waiting for a job. An
+// assignment can supply metadata for one of the new runners.
+func (l *Listener) reconcile(ctx context.Context, stats *scaleset.RunnerScaleSetStatistic, jobs []*scaleset.JobAssigned) error {
+	if stats == nil {
+		return nil
+	}
+	shortfall := min(max(stats.TotalAssignedJobs, 0), l.bound) - int(l.inFlight.Load())
+	if shortfall <= 0 {
+		return nil
+	}
 	var pending []*scaleset.JobAssigned
 	for _, job := range jobs {
 		if job == nil {
@@ -420,6 +433,9 @@ func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) 
 			continue
 		}
 		pending = append(pending, job)
+		if len(pending) == shortfall {
+			break
+		}
 	}
 	defer func() {
 		for _, job := range pending {
@@ -427,14 +443,11 @@ func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) 
 		}
 	}()
 
-	for len(pending) > 0 {
+	for range shortfall {
 		if ctx.Err() != nil {
 			return nil
 		}
-		// Reactive gate (ADR-0005, #163): a single message can carry a whole
-		// matrix, so the per-poll capacity report cannot brake mid-batch -- this
-		// does. Block until the host has reserve headroom for one more job, or
-		// bail out cleanly on shutdown. No-op for probe-less (device/fixed) types.
+		// Wait for local reserve headroom before starting each runner.
 		if l.probe != nil && !l.admitOne(ctx) {
 			return nil
 		}
@@ -450,7 +463,13 @@ func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) 
 			return nil
 		}
 
-		job := pending[0]
+		var job scaleset.JobAssigned
+		hasAssignment := len(pending) > 0
+		if hasAssignment {
+			job = *pending[0]
+		} else {
+			job.JobID = "runner-" + uuid.NewString()
+		}
 		// Once minting starts, finish the bounded request and dispatch on
 		// success even if shutdown begins during the request.
 		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.cfg.RequestTimeout)
@@ -473,15 +492,19 @@ func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) 
 				BuildTool:        l.cfg.BuildTool,
 			},
 		}
-		pending = pending[1:]
+		if hasAssignment {
+			pending = pending[1:]
+		}
 		l.wg.Add(1)
 		l.inFlight.Add(1)
 		l.track(req.JobID)
-		go func(req assignedRequest) {
+		go func(req assignedRequest, hasAssignment bool) {
 			defer l.wg.Done()
-			defer func() { <-l.sem }()
-			defer l.releaseAssignment(req.rawJobID)
 			defer l.inFlight.Add(-1)
+			defer func() { <-l.sem }()
+			if hasAssignment {
+				defer l.releaseAssignment(req.rawJobID)
+			}
 			defer l.untrack(req.JobID)
 			// Time the job so the structured per-job record carries its duration
 			// (#131). The container exit status comes from the Provision result:
@@ -492,7 +515,7 @@ func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) 
 			if err != nil {
 				l.reportJobErr(req.ProvisionRequest, err)
 			}
-		}(req)
+		}(req, hasAssignment)
 	}
 	return nil
 }
@@ -553,8 +576,7 @@ func (l *Listener) startCapacityReporter(ctx context.Context) (stop func()) {
 }
 
 // reportCapacity emits one capacity/in-flight snapshot (#131): the pool bound,
-// the current in-flight count, and the resulting spare capacity offered to
-// GitHub. Computed from the same local occupancy the loop reports to GetMessage.
+// the current in-flight count, and the estimated local admission headroom.
 func (l *Listener) reportCapacity() {
 	inFlight := int(l.inFlight.Load())
 	l.cfg.JobLogger.CapacityReport(CapacityRecord{
@@ -671,7 +693,7 @@ func (l *Listener) startReaper(ctx context.Context) (stop func()) {
 	return func() { <-done }
 }
 
-// capacityFor is the spare-runner count to offer GitHub. For a reactive type it
+// capacityFor estimates spare local capacity for snapshots. For a reactive type it
 // is derived from a live probe (ADR-0005, #163): how many more jobs fit while
 // every resource keeps reserve headroom, capped by the safety ceiling -- a batch
 // far from the line, 1 near it (source-level serialization), 0 over it, and a

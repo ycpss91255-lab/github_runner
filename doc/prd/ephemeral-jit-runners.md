@@ -59,8 +59,8 @@ cross-job residue and secret carryover by construction.
    the listener is not limited to one job at a time.
 8. As an operator, I want the concurrency bound auto-sized from my hardware
    (e.g. GPU count), so that I do not hand-tune numbers per host.
-9. As an operator, I want reported capacity to reflect what the host can really
-   run, so that GitHub does not queue jobs against headroom that does not exist.
+9. As an operator, I want the listener to advertise the resolved pool bound
+   and use live host headroom to gate local runner starts.
 10. As an operator, I want a single failed job to be logged and skipped, so that
     one bad job never tears down the whole listener session.
 11. As an operator, I want messages acknowledged before available jobs are
@@ -118,7 +118,7 @@ cross-job residue and secret carryover by construction.
   scale-set client requires it — the listener "brain". Everything else stays in
   the repo's native bash, reusing existing seams (`_gh`, `RUNNER_HOME`/SEC-3,
   `schedule-cleanup`). The boundary is a single shell-out: the Go listener, per
-  assigned job, invokes the bash container provisioner with explicit parameters.
+  runner started, invokes the bash container provisioner with explicit parameters.
   - **Go modules**: JIT Minter (over the client's `GenerateJitRunnerConfig`);
     Listener loop (injectable `Session`, ack before availability acquisition,
     per-job failure isolation); Concurrency controller + capacity detector (bounded pool,
@@ -141,8 +141,9 @@ cross-job residue and secret carryover by construction.
   + per-type sandbox knobs, not by rootless.
 - **JIT minting is the Go client's job**; the first-pass bash JIT seam and the
   orphaned bash run seam are removed (named-once doctrine).
-- **Concurrency is auto-sized** from host capacity and reported from a local
-  in-flight count, not the server's `TotalAssignedJobs`.
+- **Concurrency is auto-sized** from host capacity. Each poll advertises the
+  resolved bound, and the local runner count is reconciled against
+  `TotalAssignedJobs` up to that bound.
 - **Per-runner-type config** maps one type to one homogeneous scale set; config
   is read authoritatively by the Go loader and relevant fields passed to bash.
 - **Job history captured before teardown**, never storing secrets, bounded by

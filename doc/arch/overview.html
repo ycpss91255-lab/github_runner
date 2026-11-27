@@ -1057,9 +1057,9 @@ td {
 
 <figure>
 <svg viewBox="0 0 880 380" role="img" aria-label="Reactive admission flow: probe, admits(), settle, re-probe loop">
-  <!-- capacityFor (poll-time) -->
+  <!-- capacityFor (local snapshot) -->
   <rect x="30" y="20" width="380" height="150" rx="8" fill="var(--go-fill)" stroke="var(--go)" stroke-width="1.2"/>
-  <text x="220" y="44" text-anchor="middle" font-size="10" font-weight="600" fill="var(--go)">capacityFor (per poll)</text>
+  <text x="220" y="44" text-anchor="middle" font-size="10" font-weight="600" fill="var(--go)">capacityFor (local snapshot)</text>
 
   <rect x="50" y="56" width="140" height="28" rx="4" fill="var(--surface)" stroke="var(--go-soft)" stroke-width="1"/>
   <text x="120" y="75" text-anchor="middle" font-size="8" fill="var(--text-1)">probe.Probe(ctx)</text>
@@ -1129,7 +1129,7 @@ td {
   <text x="220" y="330" text-anchor="middle" font-size="8" fill="var(--text-1)">reserve: operator knob (default 10%, upward-only, min 10)</text>
   <text x="220" y="346" text-anchor="middle" font-size="8" fill="var(--text-2)">sem ceiling: internal safety (nproc), not operator-set</text>
 </svg>
-<figcaption>反應式准入（ADR-0005）。准入在兩處發生：<code>capacityFor</code>（per poll，回報給 GitHub batch size）和 <code>admitOne</code>（per job，mid-batch brake）。CPU 使用 in-flight count 預測（loadavg 滯後），memory 直接讀取（即時）。Probe error fail-safe：准入（sem ceiling 是最後防線）。</figcaption>
+<figcaption>Reactive admission (ADR-0005). <code>capacityFor</code> estimates local headroom for snapshots. Each GitHub poll advertises the pool bound. <code>admitOne</code> checks reserve headroom before each runner starts. CPU admission accounts for in-flight runners because load averages lag. Memory admission uses the current reading. On probe error the semaphore still caps concurrency.</figcaption>
 </figure>
 
 <!-- ============================================================ -->

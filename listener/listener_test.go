@@ -114,7 +114,7 @@ func (f *fakeSession) Close(ctx context.Context) error {
 // returns a scripted encoded config per job name and records every mint call so
 // a test can assert the assigned job was minted with the expected name.
 type recordingMinter struct {
-	config   string   // encoded JIT config to return
+	config   string // encoded JIT config to return
 	onMint   func(context.Context, string) error
 	gotNames []string // job names passed to Mint
 }
@@ -375,6 +375,12 @@ func TestProvisionerErrorIsIsolatedLoopContinues(t *testing.T) {
 		Image:    "img",
 		OnJobErr: func(_ ProvisionRequest, err error) { loggedJobErrs = append(loggedJobErrs, err) },
 	})
+
+	sess.beforePoll = func(lastMessageID int) {
+		if lastMessageID == 1 {
+			l.wg.Wait() // The failed runner has exited before the next demand snapshot.
+		}
+	}
 
 	err := l.Listen(ctx)
 
@@ -905,7 +911,7 @@ func TestLoopKeepsPollingWhileJobsRun(t *testing.T) {
 	sess := &fakeSession{
 		messages: []*scaleset.RunnerScaleSetMessage{
 			msgWithAssigned(1, 1, assigned(1, "slow-1")),
-			msgWithAssigned(2, 1, assigned(2, "slow-2")),
+			msgWithAssigned(2, 2, assigned(2, "slow-2")),
 		},
 		cancel: cancel,
 	}
@@ -937,7 +943,7 @@ func TestLoopKeepsPollingWhileJobsRun(t *testing.T) {
 }
 
 // The pool must be BOUNDED: with a bound of 2 and three jobs offered at once,
-// no more than 2 run simultaneously. The third waits for a slot.
+// no more than 2 run simultaneously. The third is outside the capped target.
 func TestPoolBoundCapsConcurrency(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -957,8 +963,7 @@ func TestPoolBoundCapsConcurrency(t *testing.T) {
 	done := make(chan struct{})
 	go func() { _ = l.Listen(ctx); close(done) }()
 
-	// Exactly 2 jobs may start while the slot-holders are blocked; the 3rd must
-	// wait. Drain 2 starts, then assert no 3rd arrives until we release.
+	// Exactly 2 jobs may start while the slot-holders are blocked.
 	for i := 0; i < 2; i++ {
 		select {
 		case <-probe.started:
@@ -970,7 +975,7 @@ func TestPoolBoundCapsConcurrency(t *testing.T) {
 	case <-probe.started:
 		t.Fatal("a 3rd job started while the bound is 2 (semaphore not enforced)")
 	case <-time.After(150 * time.Millisecond):
-		// good -- the 3rd job is parked waiting for a slot.
+		// The third is outside the capped target.
 	}
 	if got := probe.peakLive(); got > 2 {
 		t.Fatalf("concurrency exceeded the bound of 2: peak %d", got)
@@ -1206,6 +1211,7 @@ func TestListenDeduplicatesInFlightRawJobID(t *testing.T) {
 			messages := []*scaleset.RunnerScaleSetMessage{first}
 			lastBeforeRelease := 1
 			if duplicateInEnvelope {
+				first.Statistics.TotalAssignedJobs = 2
 				first.JobAssignedMessages = append(first.JobAssignedMessages, duplicate, sibling)
 			} else {
 				messages = append(messages, msgWithAssigned(2, 2, duplicate, sibling))
@@ -1326,6 +1332,7 @@ func TestListenBoundsEnvelopeRequests(t *testing.T) {
 				}
 				sess.onAcquire = block
 			} else {
+				msg.Statistics = &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: 1}
 				msg.JobAssignedMessages = []*scaleset.JobAssigned{assigned(42, "job-abc")}
 				minter.onMint = func(ctx context.Context, _ string) error { return block(ctx) }
 			}
@@ -1378,7 +1385,7 @@ func TestListenReturnsMintErrorAfterDispatchingEarlierAssignment(t *testing.T) {
 		},
 	}
 	prov := &recordingProvisioner{}
-	l := New(sess, minter, prov, Config{MaxRunners: 1})
+	l := New(sess, minter, prov, Config{MaxRunners: 3})
 
 	if err := l.Listen(context.Background()); !errors.Is(err, mintErr) {
 		t.Errorf("Listen returned %v, want %v", err, mintErr)

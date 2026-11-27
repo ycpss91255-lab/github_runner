@@ -321,12 +321,12 @@ listener_env_value() {
   printf '%s\n' "${value}"
 }
 
-# Emit defaults for absent or empty settings. An empty file yields the defaults
-# for a new installation.
+# Emit defaults for absent or empty settings and relative script paths.
+# An empty file yields the defaults for a new installation.
 listener_missing_env_defaults() {
   local file=$1 config_url=$2 types_config=$3 type_name=$4
   local prefix=${LISTENER_PREFIX:-/opt/github-runner-listener}
-  local owner="" assignment
+  local owner="" assignment key value
   if [[ -z $(listener_env_value "${file}" SCALE_SET_OWNER) ]]; then
     if ! owner=$(hostname) || [[ -z ${owner} ]]; then
       echo "FAIL: cannot derive SCALE_SET_OWNER from hostname" >&2
@@ -341,11 +341,17 @@ listener_missing_env_defaults() {
     "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" \
     "REAP_SCRIPT=${prefix}/listener/reap.sh" \
     "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh"; do
-    if [[ -z $(listener_env_value "${file}" "${assignment%%=*}") ]]; then
-      # An empty default cannot fill a setting on reruns.
-      [[ -n ${assignment#*=} || ${file} == /dev/null ]] || continue
-      printf '%s\n' "${assignment}"
-    fi
+    key=${assignment%%=*}
+    value=$(listener_env_value "${file}" "${key}")
+    case ${key} in
+      PROVISION_SCRIPT|REAP_SCRIPT|HOST_PROBE_CMD)
+        [[ ${value} != /* ]] || continue ;;
+      *)
+        [[ -z ${value} ]] || continue ;;
+    esac
+    # An empty default cannot fill a setting on reruns.
+    [[ -n ${assignment#*=} || ${file} == /dev/null ]] || continue
+    printf '%s\n' "${assignment}"
   done
 }
 
@@ -356,7 +362,7 @@ listener_backfill_env_file() {
     # The last assignment wins. The leading newline handles legacy files
     # without a final newline.
     printf '\n%s\n' "${missing}" >> "${file}" || return 1
-    echo "  environment file: backfilled missing keys in ${file} (0600)"
+    echo "  environment file: backfilled defaults in ${file} (0600)"
   else
     echo "  environment file: ${file} already in place (0600), skipped"
   fi

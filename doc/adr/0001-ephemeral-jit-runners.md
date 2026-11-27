@@ -47,8 +47,8 @@ one job, then de-registers.
   canonical minting path. The bash JIT seam built in the first implementation
   pass is removed.
 - **Concurrency**: a **bounded worker pool sized automatically from host
-  capacity** (e.g. GPU / device count), reporting **locally-derived** capacity —
-  not the server's `TotalAssignedJobs`.
+  capacity** (e.g. GPU / device count). Every poll advertises that bound. The
+  listener uses the server's `TotalAssignedJobs` to reconcile the local pool.
 - **Per-job isolation**: each job runs in a **fresh, single-use container** torn
   down after the job.
 

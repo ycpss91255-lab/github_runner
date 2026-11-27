@@ -7,21 +7,14 @@ Go) as the non-k8s, outbound long-poll orchestrator and supplies the one piece
 that client does *not*: the per-job container provisioning where the
 residue/secret isolation actually lands.
 
-## What this owns vs. what GitHub's client owns
+## Session and provisioning
 
-The split is the whole point of the ADR:
-
-| GitHub's `actions/scaleset` client owns | This package owns |
-| --- | --- |
-| The outbound long-poll **scale-set session** protocol (no inbound webhook) | The **provisioning glue** between demand and a container |
-| Reading demand (`Statistics.TotalAssignedJobs`) | Reporting spare **capacity** back so GitHub never over-assigns |
-| *When / how many* runners | *How* each job is isolated: one fresh, single-use, rootless container per job |
-
-We never decide scheduling. For each **ASSIGNED** job the listener shells out
-to [`provision-job.sh`](provision-job.sh), which bridges to the Phase 3 seam
-[`lib/runner-container.sh`](../lib/runner-container.sh) (`runner_container_run`)
-— so that seam stays the single source of truth for the
-`--rm` single-use container.
+The GitHub client handles the outbound long-poll protocol. The listener
+advertises its resolved pool bound on every poll and reconciles assigned
+demand against its local runner count. It starts a single-use rootless
+container for each runner through [`provision-job.sh`](provision-job.sh) and
+[`lib/runner-container.sh`](../lib/runner-container.sh). GitHub dispatches
+assigned jobs to those runners.
 
 ## What workflows target: the labels, not the name
 
@@ -90,10 +83,11 @@ The unit tests (`listener_test.go`, `provisioner_test.go`) drive the loop
 through the `Session` seam with a scripted fake session and a recording
 provisioner, asserting:
 
-- an ASSIGNED job triggers the container shell-out with its JIT config + image,
-- reported capacity **follows demand** (`MaxRunners − TotalAssignedJobs`),
+- new runners receive a JIT config and the configured image,
+- every poll advertises the resolved bound,
+- startup, message statistics, and empty polls reconcile assigned demand,
 - each processed message is acked (`DeleteMessage`),
-- a provisioner error surfaces **and** the session is torn down (`Close`),
+- a provisioner error is reported and the loop continues,
 - a clean drain still tears the session down,
 - available-but-unassigned jobs do **not** provision,
 - the real client satisfies `Session`.
@@ -131,19 +125,20 @@ docker run --rm -e GITHUB_CONFIG_URL -e GITHUB_TOKEN -e SCALE_SET_NAME \
 | Env | Meaning |
 | --- | --- |
 | `GITHUB_CONFIG_URL` | GitHub organization or repository URL (required) |
-| `SCALE_SET_OWNER` | session owner (deployment defaults to the output of `hostname`) |
+| `SCALE_SET_OWNER` | session owner (listener falls back to the hostname, then a generated UUID) |
 | `GITHUB_TOKEN` | token with scale-set admin scope (required) |
 | `SCALE_SET_NAME` | the scale set to connect to, **by name** (required). An identifier, not the runs-on target -- see above |
 | `RUNNER_IMAGE` | per-job container image (default `ghcr.io/actions/actions-runner:latest`) |
 | `AUTO_SIZE_DEVICES` | when set, size the pool to the detected device count (#103) instead of reactive live-admission |
 | `DEVICE_DETECT_CMD` | device-enumeration command for auto-sizing (default `nvidia-smi`, one device per output line) |
-| `HOST_PROBE_CMD` | host reader for reactive live-admission (default `host-probe.sh`; ADR-0005, #163) |
-| `PROVISION_SCRIPT` | path to `provision-job.sh` (default command on `PATH`) |
-| `REAP_SCRIPT` | path to `reap.sh`, the orphan-sweep entrypoint (default command on `PATH`) |
+| `HOST_PROBE_CMD` | host reader for reactive live-admission (default installed `listener/host-probe.sh`; ADR-0005, #163) |
+| `PROVISION_SCRIPT` | default installed `listener/provision-job.sh` |
+| `REAP_SCRIPT` | orphan-sweep entrypoint (default installed `listener/reap.sh`) |
 
 Deployment sets `HOST_PROBE_CMD`, `PROVISION_SCRIPT`, and `REAP_SCRIPT` to
 their installed paths under `${LISTENER_PREFIX}/listener`. Reruns backfill absent
-or empty settings in the mode-0600 environment file and preserve non-empty values.
+or empty settings in the mode-0600 environment file and replace effective
+relative script paths. Absolute script overrides are preserved.
 
 The bash seams read a few more knobs at provision/reap time:
 `RUNNER_WORK_ROOT` (parent of the per-job temp dir, default `${RUNNER_HOME}/work`
@@ -216,16 +211,21 @@ Pin the builder images by digest in production via `RUNNER_KANIKO_IMAGE` /
   request IDs from its availability events. Acquisition and JIT minting for an
   acknowledged envelope continue if shutdown begins. Dispatch still observes
   cancellation.
+- The target is the lesser of `TotalAssignedJobs` and the pool bound. Idle,
+  busy, and dispatched runners count toward the target. The listener starts
+  only the shortfall, and assignment events can supply metadata for those
+  runners. Empty polls reuse the latest statistics.
 - Assignment events with the same raw job ID are skipped while the first
   assignment is pending dispatch or running. The listener can accept that ID
   again once the worker finishes or dispatch is abandoned.
-- **Bounded worker pool (#101):** each assigned job provisions in its own
+- **Bounded worker pool (#101):** each runner provisions in its own
   goroutine gated by a semaphore sized to the pool bound, so the loop keeps
   long-polling; a clean shutdown drains in-flight jobs before teardown.
 - **Reactive live-admission (ADR-0005, #163):** by default the listener admits
   each job only while every resource (CPU, memory) keeps a reserve headroom free
-  (default 10%, the one operator knob, upward-only). Reported capacity is the
-  live admittable count; a matrix that would breach the line parks and re-probes.
+  (default 10%, the one operator knob, upward-only). Local capacity snapshots
+  record admission headroom. A batch that would breach the reserve parks and
+  re-probes.
   The host reading is `host-probe.sh` (`HOST_PROBE_CMD`).
 - **Auto-sizing (#103):** with `AUTO_SIZE_DEVICES` (or `mode: auto`), the bound
   follows the detected device count instead of reactive admission; otherwise a

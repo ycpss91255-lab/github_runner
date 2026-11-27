@@ -178,12 +178,12 @@ sudo "${EDITOR:-vi}" /etc/github-runner-listener/scaleset-listener.env
 sudo stat -c '%a %U' /etc/github-runner-listener/scaleset-listener.env   # -> 600 root
 ```
 
-Set `SCALE_SET_OWNER` to the host's hostname when editing the file manually.
-Set `PROVISION_SCRIPT`, `REAP_SCRIPT`, and `HOST_PROBE_CMD` to the installed paths
-under `${LISTENER_PREFIX}/listener` when using a custom prefix. The deploy script
-defaults the session owner to the output of `hostname` and fails if that default
-is needed and the command returns an empty value. It fills absent or empty
-settings on reruns while preserving non-empty values. If an existing environment
+The listener defaults the session owner to the hostname, then a generated UUID.
+It looks for its scripts under `${LISTENER_PREFIX}/listener` by default. To
+override a script in the environment file, use an absolute path. The deploy
+script fills absent or empty settings on reruns and replaces relative script
+paths with absolute installed paths. It derives a missing owner from
+`hostname` and fails if that lookup fails or returns an empty value. If an existing environment
 file has a mode other than 0600, deployment warns that the token may have been
 exposed and should be rotated, then restores mode 0600.
 
