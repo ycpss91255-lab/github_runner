@@ -56,6 +56,10 @@ env:
   BASE_IMAGE_NAME: ghcr.io/ycpss91255-lab/runner-base
   GPU_IMAGE_NAME: ghcr.io/ycpss91255-lab/gpu-runner
   CPU_IMAGE_NAME: ghcr.io/ycpss91255-lab/runner-cpu
+  # Baseline host tools both images must carry: jobs call them on the runner
+  # itself, outside any container (images/runner-*.Dockerfile runner-tools
+  # block, test/bats/unit/runner_image_tools.bats, deploy/README.md 3b).
+  RUNNER_TOOLS: bash curl docker git gzip jq python3 sha256sum ss tar unzip xz
 
 jobs:
   build:
@@ -121,6 +125,18 @@ jobs:
             echo "::error::runner-cpu reports an invalid runner version: ${version}"
             exit 1
           }
+
+      # Workflows call these on the runner itself, outside any container, so a
+      # missing one fails a job whose test already passed.
+      - name: smoke test the baseline host tools
+        run: |
+          set -euo pipefail
+          for img in gpu-runner:ci runner-cpu:ci; do
+            # shellcheck disable=SC2086 # RUNNER_TOOLS is a word list
+            docker run --rm --entrypoint bash "${img}" -c \
+              'rc=0; for t; do command -v "$t" || { echo "::error::missing $t"; rc=1; }; done; exit "$rc"' \
+              bash ${RUNNER_TOOLS} || { echo "::error::${img} lacks a baseline host tool"; exit 1; }
+          done
 
       - name: the baked runner reports the resolved version
         env:
@@ -237,6 +253,13 @@ jobs:
           docker run --rm "${ref}" docker --version
           docker run --rm "${ref}" docker compose version
           docker run --rm "${ref}" docker buildx version
+          check_tools() {
+            # shellcheck disable=SC2086 # RUNNER_TOOLS is a word list
+            docker run --rm --entrypoint bash "$1" -c \
+              'rc=0; for t; do command -v "$t" || { echo "::error::missing $t"; rc=1; }; done; exit "$rc"' \
+              bash ${RUNNER_TOOLS} || { echo "::error::$1 lacks a baseline host tool"; exit 1; }
+          }
+          check_tools "${ref}"
           docker push "${ref}"
           digest=$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' | jq -r .digest)
           [[ ${digest} == sha256:* ]] || { echo "::error::no digest for ${ref}"; exit 1; }
@@ -265,6 +288,13 @@ jobs:
           }
           docker run --rm runner-cpu:build docker compose version
           docker run --rm runner-cpu:build docker buildx version
+          check_tools() {
+            # shellcheck disable=SC2086 # RUNNER_TOOLS is a word list
+            docker run --rm --entrypoint bash "$1" -c \
+              'rc=0; for t; do command -v "$t" || { echo "::error::missing $t"; rc=1; }; done; exit "$rc"' \
+              bash ${RUNNER_TOOLS} || { echo "::error::$1 lacks a baseline host tool"; exit 1; }
+          }
+          check_tools runner-cpu:build
           ref="${CPU_IMAGE_NAME}:${version}"
           printf 'FROM runner-cpu:build\n' | docker build --label "org.opencontainers.image.version=${version}" -t "${ref}" -
           docker push "${ref}"

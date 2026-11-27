@@ -12,6 +12,23 @@ FROM ${RUNNER_IMAGE}
 USER root
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# BEGIN runner-tools -- shared by images/runner-cpu.Dockerfile and
+# images/runner-gpu.Dockerfile; keep both copies byte-identical
+# (test/bats/unit/runner_image_tools.bats checks it). Needs USER root.
+#
+# Baseline host tools. Jobs used to run on a full Ubuntu host, so workflows
+# call these on the runner itself, outside any container (python3 for
+# attestation and port helpers, ss for port probes, xz and unzip for
+# archives). The list is pinned in runner_image_tools.bats and checked with
+# command -v in every image the runner-images workflow builds. Packages are
+# not version-pinned; the digest-pinned base is the reproducibility anchor.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl git iproute2 jq python3 unzip xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+# END runner-tools
+
 # BEGIN docker-cli-plugins -- shared by images/runner-cpu.Dockerfile and
 # images/runner-gpu.Dockerfile; keep both copies byte-identical
 # (test/bats/unit/runner_image_dockerfiles.bats checks it). Needs the docker
