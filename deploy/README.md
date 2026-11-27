@@ -163,6 +163,19 @@ Compose bind mounts of the job checkout. The work folder is removed at job exit
 or by the orphan sweep. See the
 [listener README](../listener/README.md#host-docker-socket-opt-in-116) for details.
 
+To prove an opted-in type end to end, dispatch the self-hosted smoke
+workflow with its Docker check on. The check runs `docker run` with same-path
+mounts, `docker build`, `docker buildx build --load`, and `docker compose run`
+against the checkout. It fails if any of them cannot see the files:
+
+```sh
+# runs_on must match the type's labels exactly (section 0).
+gh workflow run selfhosted-smoke.yaml --ref main \
+  -f runs_on='["self-hosted","linux","cpu"]' -f docker=true
+```
+
+Leave `docker` at its default `false` for types without socket access.
+
 ## 2a. Create the writable runner state tree for a manual single-unit install
 
 The unit runs under `ProtectSystem=strict`, which makes `/opt` read-only, and
