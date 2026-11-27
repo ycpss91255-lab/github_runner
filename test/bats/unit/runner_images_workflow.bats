@@ -227,3 +227,25 @@ matching_step() {
   run grep -cE '^[[:space:]]+timeout-minutes:[[:space:]]*[0-9]+' "${WF}"
   [ "${output}" -eq "${jobs}" ]
 }
+
+@test "the pull_request job runs the Docker CLI and both plugin version commands in the GPU image" {
+  run job_block build
+  [ "${status}" -eq 0 ]
+  grep -Eq 'docker run[[:blank:]].*gpu-runner[^;]*docker --version([[:blank:]]|$)' <<<"${output}"
+  grep -Eq 'docker run[[:blank:]].*gpu-runner[^;]*docker compose version([[:blank:]]|$)' <<<"${output}"
+  grep -Eq 'docker run[[:blank:]].*gpu-runner[^;]*docker buildx version([[:blank:]]|$)' <<<"${output}"
+}
+
+@test "the publish job smoke-tests the Docker CLI in the GPU image before pushing it" {
+  run matching_step publish 'images/runner-gpu[.]Dockerfile' 'docker run[^\n]*docker --version' 'docker push[[:blank:]]'
+  [ "${status}" -eq 0 ]
+  [ -n "${output}" ]
+  grep -Fq 'docker compose version' <<<"${output}"
+  grep -Fq 'docker buildx version' <<<"${output}"
+}
+
+@test "the publish job summary includes the GPU image and its digest" {
+  run matching_step publish 'GITHUB_STEP_SUMMARY' 'GPU_IMAGE_NAME' 'GPU_DIGEST|steps[.]gpu[.]outputs[.]digest'
+  [ "${status}" -eq 0 ]
+  [ -n "${output}" ]
+}

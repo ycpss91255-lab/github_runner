@@ -84,13 +84,19 @@ runner_types:
     # it with images/build-runner-image.sh (base) + a docker build of the GPU
     # Dockerfile, push to your registry, and pin THIS by the resulting digest --
     # never :latest. The 0000... below is a placeholder for the operator to fill.
+    # The image ships the docker CLI with pinned Compose and Buildx plugins;
+    # copy the digest from the runner images workflow's job summary after a
+    # publish (ghcr.io/ycpss91255-lab/gpu-runner).
     image: ghcr.io/your-org/gpu-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000
     devices:
       - /dev/nvidia0
       - /dev/nvidiactl
       - /dev/nvidia-uvm
     runtime: nvidia
-    build_tool: kaniko
+    # GPU jobs build and run containers on the host Docker daemon, so this type
+    # sets no daemonless build_tool. Enabling the socket is ROOT-EQUIVALENT on
+    # the host: enable only for trusted jobs (ADR-0011 approval gate).
+    # docker_socket: /var/run/docker.sock
     concurrency:
       mode: auto
 
