@@ -56,3 +56,20 @@ setup() {
   run grep -F 'scaleset-admin delete' "${ROOT}/deploy/README.md"
   [ "${status}" -eq 0 ]
 }
+
+@test "the architecture overview shows the shared listener template" {
+  run grep -F 'scaleset-listener@.service' "${ROOT}/doc/arch/overview.html"
+  [ "${status}" -eq 0 ]
+}
+
+@test "the architecture overview shows per-type listener environment files" {
+  run grep -F '&lt;type&gt;.env' "${ROOT}/doc/arch/overview.html"
+  [ "${status}" -eq 0 ]
+}
+
+@test "the single-unit migration guide identifies the legacy history ledger" {
+  local migration
+  migration=$(sed -n '/^### Migrating a single-unit host$/,/^## /p' "${ROOT}/deploy/README.md")
+  run grep -F 'runners/history' <<< "${migration}"
+  [ "${status}" -eq 0 ]
+}

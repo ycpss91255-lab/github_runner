@@ -12,7 +12,7 @@
 setup() {
   ROOT="${BATS_TEST_DIRNAME}/../../.."
   SCRIPT="${ROOT}/script/deploy-listener.sh"
-  WORK=$(mktemp -d)
+  WORK=$(mktemp -d "${BATS_TEST_TMPDIR}/host.XXXXXX")
   CONFIG="${WORK}/runner-types.yaml"
   cat > "${CONFIG}" <<'YAML'
 runner_types:
@@ -124,6 +124,10 @@ teardown() { rm -rf "${WORK}"; }
   [[ "${output}" == *"service user"* ]]
   [[ "${output}" == *"environment file"* ]]
   [[ "${output}" == *"systemd"* ]]
+  [[ "${output}" == *"${WORK}/etc/gpu.env"* ]]
+  [[ "${output}" == *"scaleset-listener@gpu.service"* ]]
+  [[ "${output}" == *"/scaleset-listener@.service"* ]]
+  [[ "${output}" == *"${WORK}/opt/runners/gpu/work"* ]]
 }
 
 @test "deploy-listener.sh refuses a non-interactive run without --yes" {

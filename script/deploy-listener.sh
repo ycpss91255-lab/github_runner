@@ -43,7 +43,8 @@ LISTENER_YES=0
 DRY_RUN=0
 SKIP_GITHUB=0
 CONFIG_URL=""
-TYPE_NAME="${RUNNER_TYPE:-}"
+TYPE_NAME=""
+TYPE_GIVEN=0
 TYPES_CONFIG="${RUNNER_TYPES_CONFIG:-}"
 LABELS_OPT=""
 GROUP_OPT=""
@@ -113,7 +114,7 @@ parse_args() {
                    # README, the changelog and people's shell history.
                    CONFIG_URL=${2:?$1 needs a value}; shift 2 ;;
       --config)    TYPES_CONFIG=${2:?--config needs a value}; shift 2 ;;
-      --type)      TYPE_NAME=${2:?--type needs a value}; shift 2 ;;
+      --type)      TYPE_NAME=${2-}; TYPE_GIVEN=1; shift; if (( $# )); then shift; fi ;;
       --labels)    LABELS_OPT=${2:?--labels needs a value}; shift 2 ;;
       --group)     GROUP_OPT=${2:?--group needs a value}; shift 2 ;;
       --prefix)    LISTENER_PREFIX=${2:?--prefix needs a value}; shift 2 ;;
@@ -145,9 +146,38 @@ resolve_config() {
   fi
 }
 
+migration_recovery_note() {
+  local status=$1
+  if (( status != 0 )); then
+    echo "NOTE: the legacy listener was stopped or was already inactive." >&2
+    echo "      Fix the error above, then rerun deploy with the same options to start ${LISTENER_UNIT_NAME}." >&2
+  fi
+}
+
+migrate_legacy_listener() {
+  listener_stop_unit "${LISTENER_LEGACY_UNIT_NAME}"
+  trap 'migration_recovery_note "$?"' EXIT
+  listener_disable_unit "${LISTENER_LEGACY_UNIT_NAME}"
+  rm -f -- "${LISTENER_LEGACY_UNIT_PATH}"
+  _systemctl daemon-reload
+  if [[ -f ${LISTENER_ENV_FILE} ]]; then
+    rm -- "${LISTENER_LEGACY_ENV_FILE}"
+    echo "  migrated:         removed ${LISTENER_LEGACY_ENV_FILE}; kept ${LISTENER_ENV_FILE}"
+  else
+    mv -- "${LISTENER_LEGACY_ENV_FILE}" "${LISTENER_ENV_FILE}"
+    echo "  migrated:         moved ${LISTENER_LEGACY_ENV_FILE} to ${LISTENER_ENV_FILE} (0600)"
+  fi
+  listener_backfill_env_file "${LISTENER_ENV_FILE}" "${CONFIG_URL}" "${TYPES_CONFIG}" "${LISTENER_TYPE}"
+  echo "  migrated:         retired ${LISTENER_LEGACY_UNIT_NAME} and reloaded systemd"
+  echo "  NOTE:             legacy work root ${LISTENER_PREFIX}/runners/work left in place"
+}
+
 main() {
   parse_args "$@"
   listener_deploy_paths
+  if (( TYPE_GIVEN )); then
+    listener_type_paths "${TYPE_NAME}"
+  fi
   resolve_config
 
   # The admin tool, before anything else needs it: everything below reads the
@@ -199,6 +229,20 @@ main() {
     echo "      (name one with --type when the config holds more than one)" >&2
     exit 1
   fi
+  if (( ! TYPE_GIVEN )); then
+    TYPE_NAME=$(listener_config_name "${TYPES_CONFIG}" "")
+    listener_type_paths "${TYPE_NAME}"
+  fi
+
+  local migrate_legacy=0 legacy_type="" credential_file=${LISTENER_ENV_FILE}
+  if [[ -f ${LISTENER_LEGACY_ENV_FILE} ]]; then
+    legacy_type=$(listener_legacy_type "${TYPES_CONFIG}") || legacy_type=""
+    if [[ ${legacy_type} == "${LISTENER_TYPE}" ]]; then
+      migrate_legacy=1
+      [[ -f ${credential_file} ]] || credential_file=${LISTENER_LEGACY_ENV_FILE}
+    fi
+  fi
+
   labels=$(listener_config_labels "${TYPES_CONFIG}" "${TYPE_NAME}")
   image=$(listener_config_image "${TYPES_CONFIG}" "${TYPE_NAME}")
 
@@ -233,7 +277,7 @@ main() {
   fi
   echo
   echo "  Local side:"
-  echo "    runner type:      ${TYPE_NAME:-(the only one configured)}"
+  echo "    runner type:      ${LISTENER_TYPE}"
   echo "    config:           ${TYPES_CONFIG}"
   echo "    admin tool:       ${SCALESET_ADMIN_BIN} (the config was read through it)"
   echo "    image:            ${image}"
@@ -241,7 +285,21 @@ main() {
   echo "    service user:     ${SERVICE_USER} (added to the docker group on rootful docker)"
   echo "    work root:        ${LISTENER_WORK_ROOT} (owned by ${SERVICE_USER})"
   echo "    environment file: ${LISTENER_ENV_FILE} (0600, holds the token)"
-  echo "    systemd unit:     ${LISTENER_UNIT_PATH} (enable + start)"
+  echo "    systemd instance: ${LISTENER_UNIT_NAME} (enable + start)"
+  echo "    systemd template: ${LISTENER_UNIT_PATH}"
+  if (( migrate_legacy )); then
+    echo "    Migrate:          stop and disable ${LISTENER_LEGACY_UNIT_NAME}, then remove its unit file"
+    if [[ -f ${LISTENER_ENV_FILE} ]]; then
+      echo "                      remove the legacy env file and keep ${LISTENER_ENV_FILE}"
+    else
+      echo "                      move the legacy env file to ${LISTENER_ENV_FILE}"
+    fi
+    echo "                      keep ${LISTENER_PREFIX}/runners/work in place"
+  elif [[ -n ${legacy_type} ]]; then
+    echo "    NOTE:             the legacy unit keeps serving ${legacy_type}; deploy --type ${legacy_type} to migrate it"
+  elif [[ -f ${LISTENER_LEGACY_ENV_FILE} ]]; then
+    echo "    NOTE:             the legacy unit stays in place because its type could not be resolved"
+  fi
   echo
   echo "  Workflows will target this runner type with:"
   echo "      ${runs_on}"
@@ -274,18 +332,12 @@ main() {
   # GITHUB_TOKEN. One prompt, asked up front, serves both.
   #
   # Reuse the installed credential for the GitHub half on a rerun.
-  if [[ -f ${LISTENER_ENV_FILE} ]]; then
-    local mode
-    mode=$(stat -c '%a' "${LISTENER_ENV_FILE}")
-    if [[ ${mode} != 600 ]]; then
-      printf 'WARNING: %s was mode %04d, not 0600. The token may have been exposed and should be rotated.\n' \
-        "${LISTENER_ENV_FILE}" "${mode}" >&2
-      chmod 0600 "${LISTENER_ENV_FILE}"
-    fi
+  if [[ -f ${credential_file} ]]; then
+    listener_secure_env_file "${credential_file}"
     if (( ! SKIP_GITHUB )); then
       LISTENER_TOKEN=${LISTENER_TOKEN:-${GITHUB_TOKEN:-}}
-      LISTENER_TOKEN=${LISTENER_TOKEN:-$(listener_env_value "${LISTENER_ENV_FILE}" GITHUB_TOKEN)}
-      [[ -n ${LISTENER_TOKEN} ]] || { echo "FAIL: no token in environment or ${LISTENER_ENV_FILE}" >&2; exit 1; }
+      LISTENER_TOKEN=${LISTENER_TOKEN:-$(listener_env_value "${credential_file}" GITHUB_TOKEN)}
+      [[ -n ${LISTENER_TOKEN} ]] || { echo "FAIL: no token in environment or ${credential_file}" >&2; exit 1; }
     fi
   elif [[ -z ${LISTENER_TOKEN:-} ]]; then
     if [[ -n ${GITHUB_TOKEN:-} ]]; then
@@ -301,9 +353,11 @@ main() {
   # Whatever the interaction settled on goes into the config, so the routing key
   # is written down and not just in this terminal's scrollback.
   if [[ -n ${LABELS_OPT} && ${LABELS_OPT} != "${labels}" ]]; then
-    local target_config="${LISTENER_ETC}/runner-types.yaml"
+    # Keep the generated entry separate so it cannot overwrite the config
+    # used by another instance.
+    local target_config="${LISTENER_ETC}/runner-types-${LISTENER_TYPE}.yaml"
     listener_write_type_config "${target_config}" \
-      "${TYPE_NAME:-default}" "${scale_set}" "${chosen_labels}" "${image}"
+      "${LISTENER_TYPE}" "${scale_set}" "${chosen_labels}" "${image}"
     echo "  config:           recorded labels [${chosen_labels//,/, }] in ${target_config}"
     TYPES_CONFIG="${target_config}"
   fi
@@ -313,8 +367,7 @@ main() {
     echo "GitHub side: skipped."
   else
     echo "GitHub side:"
-    local admin_args=(create --config "${TYPES_CONFIG}")
-    [[ -n ${TYPE_NAME} ]] && admin_args+=(--type "${TYPE_NAME}")
+    local admin_args=(create --config "${TYPES_CONFIG}" --type "${LISTENER_TYPE}")
     [[ -n ${GROUP_OPT} ]] && admin_args+=(--group "${GROUP_OPT}")
     # The token reaches the child through the ENVIRONMENT, never its argv.
     GITHUB_CONFIG_URL="${CONFIG_URL}" GITHUB_TOKEN="${LISTENER_TOKEN:-}" \
@@ -332,7 +385,12 @@ main() {
   listener_ensure_engine_access "${SERVICE_USER}"
   listener_ensure_work_root "${SERVICE_USER}"
 
-  if listener_env_file_ready "${LISTENER_ENV_FILE}"; then
+  if (( migrate_legacy )); then
+    if [[ ${credential_file} != "${LISTENER_LEGACY_ENV_FILE}" ]]; then
+      listener_secure_env_file "${LISTENER_LEGACY_ENV_FILE}"
+    fi
+    migrate_legacy_listener
+  elif listener_env_file_ready "${LISTENER_ENV_FILE}"; then
     listener_backfill_env_file "${LISTENER_ENV_FILE}" "${CONFIG_URL}" \
       "${TYPES_CONFIG}" "${TYPE_NAME}"
   else
@@ -340,12 +398,7 @@ main() {
       "${TYPES_CONFIG}" "${TYPE_NAME}"
   fi
 
-  local unit_src="${REPO_ROOT}/deploy/scaleset-listener.service"
-  if listener_unit_current "${unit_src}" "${LISTENER_UNIT_PATH}"; then
-    echo "  systemd unit:     ${LISTENER_UNIT_PATH} already current, skipped"
-  else
-    listener_install_unit "${unit_src}" "${LISTENER_UNIT_PATH}"
-  fi
+  listener_deploy_template "${REPO_ROOT}/deploy/${LISTENER_TEMPLATE_UNIT_NAME}" "${SERVICE_USER}"
 
   listener_enable_unit "${LISTENER_UNIT_NAME}"
   listener_start_unit "${LISTENER_UNIT_NAME}"
@@ -381,7 +434,7 @@ Dispatch it, then watch this host pick it up:
 The job's REST status stays "queued" even after it has been assigned to the
 scale set, so watch the journal rather than the queued/in-progress field.
 
-To take this machine back down: ./script/teardown-listener.sh
+To remove this listener: ./script/teardown-listener.sh --type ${LISTENER_TYPE}
 EOF
 }
 

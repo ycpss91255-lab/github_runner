@@ -43,13 +43,12 @@ prints.
 
 ## The short way: one command
 
-Every numbered section below is a step this command performs. Prefer the
-command: a runbook is a thing people mean to follow, and these steps went
-unfollowed long enough that nothing was ever deployed.
+The deploy command builds and installs one listener instance for a runner
+type. See section 3a for running several types on the same host.
 
 ```sh
-sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --dry-run
-sudo ./script/deploy-listener.sh --config-url https://github.com/<org>
+sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --type gpu --dry-run
+sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --type gpu
 ```
 
 **What the scale set binds to.** `--config-url` takes either shape, and the
@@ -78,8 +77,8 @@ identical -- `docker` group membership is root-equivalent either way.
 It covers both halves and says which is which: the **GitHub side** (create the
 runner type's scale set, if it is not already there -- section 3c) and the
 **local side** (build and install, service user and its engine access, the
-writable runner state tree, 0600 environment file, systemd unit, enable, start
--- sections 1, 2, 2a, 3, 4). It then verifies the listener
+per-type writable runner state tree, 0600 environment file, and systemd
+instance in section 3a). It then verifies the listener
 actually connected and is reporting capacity, and prints the exact `runs-on:`
 line for your first job.
 
@@ -103,7 +102,7 @@ The admin token is **prompted for and never a flag**: `/proc/<pid>/cmdline` is
 world-readable, so a token in an argument is a token any local user on the box
 can read, and it would sit in shell history besides.
 
-To take a machine back down: `sudo ./script/teardown-listener.sh`. It reverses
+To remove all listener instances from this host: `sudo ./script/teardown-listener.sh`. It reverses
 the local half only, and deliberately does not delete the scale set -- that is
 shared by every machine serving the runner type, so retiring it is a separate
 explicit act (`scaleset-admin delete`).
@@ -148,21 +147,21 @@ sudo usermod -aG docker ci-runner
 `docker` group membership is root-equivalent on the host; job code never gets
 the socket (see `listener/README.md`), only the listener does.
 
-## 2a. Create the writable runner state tree
+## 2a. Create the writable runner state tree for a manual single-unit install
 
 The unit runs under `ProtectSystem=strict`, which makes `/opt` read-only, and
 grants back exactly `ReadWritePaths=/opt/github-runner-listener/runners`
 (`RUNNER_HOME`): the per-job dirs go under its `work/` root and the job-history
 ledger under `history/`. The directory has to exist and belong to the service
 user; systemd refuses to start the unit when a `ReadWritePaths` entry is
-missing. `deploy-listener.sh` creates it. By hand:
+missing. Create this tree for the legacy unit in section 4:
 
 ```sh
 sudo install -d -m 0750 -o ci-runner -g ci-runner \
   /opt/github-runner-listener/runners /opt/github-runner-listener/runners/work
 ```
 
-## 3. Provide the token via an EnvironmentFile (mode 0600) (#109)
+## 3. Provide the token for a manual single-unit install (#109)
 
 The scale-set admin token is **never** baked into the unit, passed on the
 command line, or logged — it is read from a root-only EnvironmentFile:
@@ -187,10 +186,9 @@ paths with absolute installed paths. It derives a missing owner from
 file has a mode other than 0600, deployment warns that the token may have been
 exposed and should be rotated, then restores mode 0600.
 
-## 3a. (Optional) Register a runner type via the per-type config (#110/#112/#113)
+## 3a. Deploy one listener instance per runner type (#110/#112/#113)
 
-Instead of the discrete `SCALE_SET_NAME` / `RUNNER_IMAGE` knobs, drive the
-listener from a **runner-type config**. Each entry maps one runner type to one
+Each entry in the **runner-type config** maps one runner type to one
 homogeneous scale set (labels, image, device passthrough, runtime, build tool,
 concurrency); adding a type is a new entry, not a code change.
 Concurrency is reactive live-admission by default — the count is derived from
@@ -203,22 +201,86 @@ parser ([ADR-0003](../doc/adr/0003-go-bash-boundary.md)).
 sudo install -m 0644 deploy/runner-types.sample.yaml \
   /etc/github-runner-listener/runner-types.yaml
 sudo "${EDITOR:-vi}" /etc/github-runner-listener/runner-types.yaml
-# Then in the EnvironmentFile, point at it and pick the type this unit serves:
-#   RUNNER_TYPES_CONFIG=/etc/github-runner-listener/runner-types.yaml
-#   RUNNER_TYPE=gpu
 ```
 
-The shipped sample defines the first concrete **GPU** type (auto concurrency =
-detected GPU count via `nvidia-smi -L`, precise `--device` passthrough, no
-`--privileged`) plus a second **CPU** type — proving two types run side by side
-with no code change. One listener process serves one scale set, so run **one
-unit per type** (copy the unit under a per-type name, each with its own
-`RUNNER_TYPE`).
+The shipped sample defines a **GPU** type with precise device passthrough and
+concurrency based on the detected GPU count, and a **CPU** type. Deploy both
+on the same host using their names. Omit `--skip-github` if the CPU scale set
+still needs to be created.
+
+```sh
+sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --type gpu
+sudo ./script/deploy-listener.sh --config-url https://github.com/<org> --type cpu --skip-github
+journalctl -u scaleset-listener@gpu.service -f
+```
+
+The deploy command installs the shared `scaleset-listener@.service` template
+and enables `scaleset-listener@<type>.service` for each deployed type. When
+deploy replaces the template, it reloads systemd and restarts all active
+instances that use it. It creates the token
+file `/etc/github-runner-listener/<type>.env` at mode 0600 and sets
+`RUNNER_TYPE`, `RUNNER_HOME`, and `RUNNER_MANAGED_BY`. Each instance can
+write to its own `/opt/github-runner-listener/runners/<type>` tree, with jobs
+in `work/` and ledger data in `history/`. The reaper prunes temporary
+directories under `RUNNER_HOME/work` by default. It sweeps containers whose
+`managed-by` label matches `RUNNER_MANAGED_BY`. The default label value is
+`github-runner-listener-<type>`. Keep any overrides distinct among listeners
+that share a container engine. All types sharing a template use the same
+`--prefix`, `--etc`, and `--user` settings.
+
+Pass `--type` when the config defines multiple types. With a single entry,
+deploy resolves its name through `scaleset-admin show`. Type names must match
+`^[a-z0-9][a-z0-9_-]{0,62}$`. The names `work`, `history` and
+`scaleset-listener` are reserved.
+
+To remove just the CPU instance, preview and then confirm the local teardown.
+
+```sh
+sudo ./script/teardown-listener.sh --type cpu --dry-run
+sudo ./script/teardown-listener.sh --type cpu
+```
+
+Typed teardown also removes the generated `runner-types-<type>.yaml` for that
+type, if present. The template and shared installation stay in place while
+another instance or the legacy unit remains. Omit `--type` to remove all
+listeners and generated per-type configs from the host. The scale sets on
+GitHub remain available to other hosts.
 
 > **Live GPU validation is HITL.** The config, its loading, and auto-concurrency
 > from the GPU count are exercised AFK (the detector is stubbed in the Go tests).
 > A GPU job *actually running* needs a real GPU host with the NVIDIA stack — an
 > operator step on the target host.
+
+### Migrating a single-unit host
+
+Run the deploy command for the type that the legacy listener serves. Use
+`--dry-run` to preview the migration and `--skip-github` if the scale set
+already exists. Deploy stops and disables `scaleset-listener.service`, removes
+its unit file, and reloads systemd. It moves the legacy environment file
+`/etc/github-runner-listener/scaleset-listener.env` to `<type>.env` and reuses
+the existing token. If `<type>.env` already exists, deploy keeps it and
+removes the legacy env file. It backfills settings and starts the instance.
+If a later step fails after the legacy service stops, deploy prints a recovery
+note on stderr. Fix the reported error and rerun deploy with the same options.
+
+Deploy identifies the legacy type from `RUNNER_TYPE`, or from the only
+configured type if that setting is empty. If you deploy another type first,
+the legacy unit keeps serving its current type until you deploy that type.
+Migration leaves `/opt/github-runner-listener/runners/work` in place.
+The legacy history ledger stays at `<prefix>/runners/history`. To carry it
+forward before migration, stop the legacy unit, create
+`<prefix>/runners/<type>` if needed, and move the ledger to
+`<prefix>/runners/<type>/history`. To move it afterward, stop the per-type
+instance first and preserve any history it has already written.
+
+The legacy unit has up to 120 seconds (`TimeoutStopSec`) to drain. Legacy job
+containers that outlast the drain keep their original `managed-by` label
+(`github-runner-listener` by default). The new instance's startup and
+periodic sweeps only select its configured label, so containers with a
+different legacy label need manual cleanup. Before removing them, verify
+they belong to the retired listener and their jobs have ended. If the
+migrated environment explicitly retains the legacy label, the new instance's
+startup sweep can remove those containers as orphans.
 
 ## 3b. Build (or pin) the per-type runner images (#92: #120/#121/#122)
 
@@ -365,7 +427,11 @@ scaleset-admin delete --config /etc/github-runner-listener/runner-types.yaml \
 
 Deleting one that is not there succeeds as a no-op, so a teardown can be re-run.
 
-## 4. Install, enable & start the unit
+## 4. Install, enable & start the legacy unit by hand
+
+Use this unit with the state tree and token file in sections 2a and 3 for a
+manual single-listener install. The deploy command uses the template in
+section 3a.
 
 ```sh
 sudo install -m 0644 deploy/scaleset-listener.service \
@@ -412,7 +478,7 @@ without an error. GitHub now documents the version-specific
 The unit is checkable without a live install:
 
 ```sh
-systemd-analyze verify deploy/scaleset-listener.service
+systemd-analyze verify deploy/scaleset-listener@.service deploy/scaleset-listener.service
 ```
 
 > **Live install is HITL.** Enabling the unit on a real host needs that host,
