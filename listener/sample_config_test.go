@@ -115,3 +115,25 @@ func TestCPUTypeImagePinnedToCurrentRunner(t *testing.T) {
 	}
 	t.Fatal("sample config is missing the plain CPU runner type")
 }
+
+// The gpu sample pins the published gpu-runner image (actions-runner 2.338.2 +
+// docker CLI, Compose and Buildx), not a placeholder digest.
+func TestGPUTypeImagePinnedToPublishedImage(t *testing.T) {
+	types, err := LoadConfig(sampleConfigPath(t))
+	if err != nil {
+		t.Fatalf("load sample: %v", err)
+	}
+	const publishedImage = "ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d"
+	for _, rt := range types {
+		if rt.Name == "gpu" {
+			if rt.Image != publishedImage {
+				t.Errorf("gpu image = %q, want %q", rt.Image, publishedImage)
+			}
+			if rt.ScaleSet != "gpu" {
+				t.Errorf("gpu scale_set = %q, want the fleet name %q", rt.ScaleSet, "gpu")
+			}
+			return
+		}
+	}
+	t.Fatal("sample config is missing the gpu runner type")
+}

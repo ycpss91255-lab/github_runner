@@ -23,7 +23,7 @@ setup() {
 @test "the runner-type sample defines the concrete GPU type with auto concurrency (#113)" {
   run grep -E '^[[:space:]]*-[[:space:]]*name:[[:space:]]*gpu' "${DEPLOY}"
   [ "${status}" -eq 0 ]
-  run grep -E 'scale_set:[[:space:]]*gpu-runners' "${DEPLOY}"
+  run grep -E '^[[:space:]]*scale_set:[[:space:]]*gpu$' "${DEPLOY}"
   [ "${status}" -eq 0 ]
   run grep -E 'mode:[[:space:]]*auto' "${DEPLOY}"
   [ "${status}" -eq 0 ]
