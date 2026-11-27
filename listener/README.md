@@ -158,13 +158,22 @@ runner-type config (the shell-out contract, ADR-0003):
 | `RUNNER_PIDS_LIMIT` | `--pids-limit` value (default `4096`); bounds in-container PIDs (#114) |
 | `RUNNER_CAP_ADD` | space-separated capabilities to add back on top of `--cap-drop=ALL` (default none) (#114) |
 | `RUNNER_DEVICES` | space/newline-separated host device nodes passed through precisely as `--device` -- never `--privileged` (#117) |
+| `RUNNER_CONTAINER_HOME` | the runner's home inside the image, used as the container's working directory (default `/home/runner`); set it only for an image that installs the runner elsewhere |
 | `RUNNER_DOCKER_SOCKET` | **opt-in only**: host docker socket to bind-mount; **empty by default so NO socket reaches a job** (#116) |
 
 Fixed (not knobs): `--cap-drop=ALL` and `--security-opt no-new-privileges` are
 always applied; the **default seccomp profile is kept** (never
-`seccomp=unconfined`) and **MAC stays enforced** -- there is no `label=disable`;
-the runner dir is bind-mounted with `:Z` so SELinux/AppArmor relabels it for the
-container (#115). The container is **never `--privileged`**.
+`seccomp=unconfined`) and **MAC stays enforced** -- there is no `label=disable`,
+and any bind mount (only the opt-in docker socket) is relabelled `:Z` (#115).
+The container is **never `--privileged`**.
+
+**No host directory is mounted into a job.** The container runs the runner the
+image ships at `RUNNER_CONTAINER_HOME` (default `/home/runner`, the layout of
+both `images/runner-base.Dockerfile` and `ghcr.io/actions/actions-runner`) as
+its working directory. The job's `_work` and `_diag` live in the container's own
+writable layer and are removed with it by `--rm`. The per-job host dir under the
+work root is only bookkeeping: it anchors the credential env-file, which sits
+beside it rather than inside it (#140), and it is what the reaper sweeps.
 
 **Docker socket is never mounted by default (#116).** Job code therefore cannot
 reach the host daemon; image builds use the daemonless build seam (#118) instead.
