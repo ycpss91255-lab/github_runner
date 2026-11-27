@@ -280,3 +280,56 @@ func TestLoadConfigMissingFile(t *testing.T) {
 		t.Errorf("error %q should mention reading the file", err.Error())
 	}
 }
+
+const dockerSocketConfig = `runner_types:
+  - name: cpu
+    scale_set: cpu-runners
+    labels: [self-hosted, cpu]
+    image: img-cpu@sha256:1
+`
+
+func TestLoadConfigDockerSocket(t *testing.T) {
+	const socket = "/var/run/docker.sock"
+	body := dockerSocketConfig + "    docker_socket: " + socket + "\n"
+	types, err := LoadConfig(writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := types[0].DockerSocket; got != socket {
+		t.Errorf("DockerSocket = %q, want %q", got, socket)
+	}
+}
+
+func TestLoadConfigDockerSocketDefaultsOff(t *testing.T) {
+	types, err := LoadConfig(writeConfig(t, dockerSocketConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := types[0].DockerSocket; got != "" {
+		t.Errorf("DockerSocket = %q, want empty", got)
+	}
+}
+
+func TestLoadConfigRejectsInvalidDockerSocket(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"relative", "relative/docker.sock"},
+		{"parent segment", "/var/run/../run/docker.sock"},
+		{"trailing slash", "/var/run/docker.sock/"},
+		{"double slash", "/var//run/docker.sock"},
+		{"colon", "/var/run/docker.sock:/x"},
+		{"whitespace", "/var/run/docker sock"},
+		{"control character", `"/var/run/docker\x7fsock"`},
+		{"boolean", "true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := dockerSocketConfig + "    docker_socket: " + tc.value + "\n"
+			_, err := LoadConfig(writeConfig(t, body))
+			if err == nil || !strings.Contains(err.Error(), "docker_socket") {
+				t.Fatalf("LoadConfig with docker_socket: %s returned %v, want docker_socket error", tc.value, err)
+			}
+		})
+	}
+}

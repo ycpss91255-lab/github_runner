@@ -98,3 +98,18 @@ func TestInstancesFromTypes(t *testing.T) {
 		t.Errorf("cpu instance should be reactive, got %+v", insts[1])
 	}
 }
+
+func TestRunnerTypeInstanceCopiesDockerSocket(t *testing.T) {
+	const socket = "/var/run/docker.sock"
+	rt := RunnerType{
+		Name:         "cpu",
+		ScaleSet:     "cpu-runners",
+		Labels:       []string{"self-hosted", "cpu"},
+		Image:        "img-cpu@sha256:2",
+		DockerSocket: socket,
+	}
+	inst := rt.Instance(InstanceDeps{})
+	if got := inst.Config.DockerSocket; got != socket {
+		t.Errorf("Config.DockerSocket = %q, want %q", got, socket)
+	}
+}

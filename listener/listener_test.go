@@ -234,6 +234,7 @@ func TestListenAcquiresAvailableJobsAndProvisionsAssignment(t *testing.T) {
 // An ASSIGNED job must shell out to the per-job container provisioner, and the
 // JIT config that the listener minted for that job must be handed through.
 func TestAssignedJobTriggersProvisioner(t *testing.T) {
+	const socket = "/var/run/docker.sock"
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess := &fakeSession{
@@ -245,9 +246,10 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 	prov := &recordingProvisioner{}
 	minter := &recordingMinter{config: "ENCODED-JIT-job-abc"}
 	l := New(sess, minter, prov, Config{
-		Image:   "ghcr.io/acme/runner:latest",
-		Devices: []string{"/dev/nvidia0", "/dev/nvidiactl"},
-		Runtime: "nvidia",
+		Image:        "ghcr.io/acme/runner:latest",
+		Devices:      []string{"/dev/nvidia0", "/dev/nvidiactl"},
+		Runtime:      "nvidia",
+		DockerSocket: socket,
 	})
 
 	if err := l.Listen(ctx); err != nil {
@@ -282,6 +284,9 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 	// provisioner can add --runtime to the container run.
 	if got.Runtime != "nvidia" {
 		t.Errorf("provisioner got wrong runtime: %q", got.Runtime)
+	}
+	if got.DockerSocket != socket {
+		t.Errorf("provisioner got DockerSocket = %q, want %q", got.DockerSocket, socket)
 	}
 }
 
