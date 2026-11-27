@@ -126,6 +126,7 @@ This lays down a self-contained tree the listener shells out against:
 ├── bin/scaleset-admin              # create / delete a runner scale set
 ├── listener/provision-job.sh       # per-job container entrypoint
 ├── listener/reap.sh                # orphan-sweep entrypoint
+├── listener/docker-gc.sh           # daily Docker GC of CI residue (section 5)
 └── lib/*.sh                         # the bash seams those scripts source
 ```
 
@@ -161,6 +162,19 @@ default, under the unit's `ReadWritePaths`. This lets the host daemon resolve
 Compose bind mounts of the job checkout. The work folder is removed at job exit
 or by the orphan sweep. See the
 [listener README](../listener/README.md#host-docker-socket-opt-in-116) for details.
+
+To prove an opted-in type end to end, dispatch the self-hosted smoke
+workflow with its Docker check on. The check runs `docker run` with same-path
+mounts, `docker build`, `docker buildx build --load`, and `docker compose run`
+against the checkout. It fails if any of them cannot see the files:
+
+```sh
+# runs_on must match the type's labels exactly (section 0).
+gh workflow run selfhosted-smoke.yaml --ref main \
+  -f runs_on='["self-hosted","linux","cpu"]' -f docker=true
+```
+
+Leave `docker` at its default `false` for types without socket access.
 
 ## 2a. Create the writable runner state tree for a manual single-unit install
 
@@ -503,6 +517,68 @@ journalctl -u scaleset-listener -f
 clean drain (SIGTERM cancels the context, in-flight jobs drain within
 `TimeoutStopSec`) or a transient error, so the host is never left without a
 listener.
+
+## 5. Docker GC of CI residue (daily timer)
+
+On hosts where runner types use the host Docker socket, jobs leave residue the
+ephemeral `--rm` lifecycle does not see: runner images pulled **by digest**
+(an old digest stays behind after every image bump and is never "dangling", so
+`docker image prune` does not take it) and empty Compose networks such as
+`github_runner_default`. `script/deploy-listener.sh` therefore installs a
+CI-owned collector, `listener/docker-gc.sh`, with a oneshot service and a daily
+timer:
+
+- `scaleset-listener-gc.service` runs
+  `<prefix>/listener/docker-gc.sh --apply --etc <etc>` as root (it reads the
+  runner-type configs and the `RUNNER_TYPES_CONFIG` key of the 0600 environment
+  files to know which images to keep).
+- `scaleset-listener-gc.timer` starts it daily (`Persistent=true`, up to 1h
+  random delay).
+
+What it removes, and only this:
+
+- **Images** from `ghcr.io/ycpss91255-lab/runner-cpu`,
+  `ghcr.io/ycpss91255-lab/gpu-runner`, `ghcr.io/ycpss91255-lab/runner-base` and
+  `ghcr.io/actions/actions-runner` that have **no tag**, no digest belonging to
+  another repository, a digest that appears on **no** `image:` line of a
+  runner-type config, **no** container (running or stopped) created from them,
+  and no `com.gitlab.*` label. Removal is by `repo@digest`, never forced. When
+  no config with an `image:` line is found, the image pass refuses to run.
+- **Networks** named `<project>_default` where `<project>` is on the project
+  list, labelled `com.docker.compose.project=<project>`, with no attached
+  container, no stopped container referencing them, no gitlab name or label,
+  and created more than 24h ago.
+
+The project list rule: Compose names a project after the directory it runs in,
+and a job runs in its repository checkout, so the project of this repository is
+`github_runner` (always listed). Add the checkout names of other repositories
+whose jobs run `docker compose` on the host to
+`<etc>/docker-gc-projects` (one per line, `#` comments allowed), to
+`DOCKER_GC_PROJECTS`, or pass `--project <name>`.
+
+It **never** removes volumes, buildx builders or the daemon build cache,
+containers, images of any other repository, tagged images, or anything with a
+gitlab label or name. Reclaiming the shared daemon build cache or other users'
+images is out of scope for CI and needs the host owner's approval.
+
+Every removal is one journal line with its own restore command:
+
+```sh
+sudo /opt/github-runner-listener/listener/docker-gc.sh          # dry run (default)
+journalctl -u scaleset-listener-gc.service                       # what ran
+# docker-gc: removed image ghcr.io/...@sha256:...; restore: docker pull ghcr.io/...@sha256:...
+```
+
+Turn it off, and back on (a redeploy keeps a disabled timer disabled; pass
+`--no-docker-gc` to deploy without it):
+
+```sh
+sudo systemctl disable --now scaleset-listener-gc.timer
+sudo systemctl enable --now scaleset-listener-gc.timer
+```
+
+`script/teardown-listener.sh` stops, disables and removes both units together
+with the shared template.
 
 ## Troubleshooting
 

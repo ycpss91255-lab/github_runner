@@ -49,6 +49,7 @@ TYPES_CONFIG="${RUNNER_TYPES_CONFIG:-}"
 LABELS_OPT=""
 GROUP_OPT=""
 SERVICE_USER="ci-runner"
+DOCKER_GC=1
 
 usage() {
   cat <<EOF
@@ -89,6 +90,11 @@ Options:
   --user <name>       service user the unit runs as (default: ci-runner)
   --skip-github       do the local half only -- for the second and later
                       machines, where the scale set already exists
+  --no-docker-gc      do not install the daily Docker GC timer
+                      (scaleset-listener-gc.timer). By default it is installed
+                      and enabled on first deploy; a rerun keeps it disabled if
+                      you turned it off with
+                        sudo systemctl disable --now scaleset-listener-gc.timer
   -n, --dry-run       print the plan; install nothing and change nothing on
                       GitHub. It may still build the admin tool it has to read
                       the config with, and it says so when it does
@@ -122,6 +128,7 @@ parse_args() {
       --unit-dir)  LISTENER_UNIT_DIR=${2:?--unit-dir needs a value}; shift 2 ;;
       --user)      SERVICE_USER=${2:?--user needs a value}; shift 2 ;;
       --skip-github) SKIP_GITHUB=1; shift ;;
+      --no-docker-gc) DOCKER_GC=0; shift ;;
       -n|--dry-run)  DRY_RUN=1; shift ;;
       -y|--yes)      LISTENER_YES=1; shift ;;
       -h|--help)     usage; exit 0 ;;
@@ -287,6 +294,12 @@ main() {
   echo "    environment file: ${LISTENER_ENV_FILE} (0600, holds the token)"
   echo "    systemd instance: ${LISTENER_UNIT_NAME} (enable + start)"
   echo "    systemd template: ${LISTENER_UNIT_PATH}"
+  if (( DOCKER_GC )); then
+    echo "    docker GC:        ${LISTENER_GC_TIMER_NAME} (daily, CI images/networks only;"
+    echo "                      off: sudo systemctl disable --now ${LISTENER_GC_TIMER_NAME})"
+  else
+    echo "    docker GC:        not installed (--no-docker-gc)"
+  fi
   if (( migrate_legacy )); then
     echo "    Migrate:          stop and disable ${LISTENER_LEGACY_UNIT_NAME}, then remove its unit file"
     if [[ -f ${LISTENER_ENV_FILE} ]]; then
@@ -402,6 +415,9 @@ main() {
 
   listener_enable_unit "${LISTENER_UNIT_NAME}"
   listener_start_unit "${LISTENER_UNIT_NAME}"
+  if (( DOCKER_GC )); then
+    listener_deploy_gc "${REPO_ROOT}/deploy"
+  fi
   echo
 
   # --- verify --------------------------------------------------------------

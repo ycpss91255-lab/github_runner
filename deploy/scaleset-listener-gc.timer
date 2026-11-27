@@ -1,0 +1,14 @@
+[Unit]
+# Daily trigger for scaleset-listener-gc.service (the CI-owned Docker GC).
+# Disable with: sudo systemctl disable --now scaleset-listener-gc.timer
+# Re-enable with: sudo systemctl enable --now scaleset-listener-gc.timer
+Description=Daily conservative Docker GC of CI residue
+Documentation=https://github.com/ycpss91255-lab/github_runner
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
