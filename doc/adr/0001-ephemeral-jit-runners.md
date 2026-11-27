@@ -66,17 +66,18 @@ admission*.
   and would force maintaining two daemons.
 - **Security comes from the architecture, not from rootless.** The untrusted
   thing — the job — runs inside a throwaway container that, by default, does
-  **not** receive the Docker socket. So the "runner in the `docker` group = host
-  root" exposure (#82) is **no longer reachable by job code**; the listener that
-  holds Docker access runs only our trusted code.
+  **not** receive the Docker socket. With the socket off, job code has no
+  access to the listener's Docker privileges (#82).
 - **Defense-in-depth on every job container**: `--cap-drop=ALL` (+ minimal
   add-back), `--security-opt no-new-privileges`, default seccomp kept, MAC
   (SELinux/AppArmor) kept **enforced** (no `label=disable`; use `:Z` relabel for
   mounts), `--pids-limit`, non-root in-container user where possible.
-- **DinD / image builds**: **never mount the host Docker socket** into a job.
-  Image builds use a daemonless rootless builder (**Kaniko / BuildKit-rootless /
-  Buildah**). Jobs that genuinely need an inner daemon use **Sysbox** or rootless
-  DinD-in-container.
+- **DinD / image builds**: socket access defaults to off. Image builds can use
+  a daemonless rootless builder (**Kaniko / BuildKit-rootless / Buildah**).
+  Jobs that need an inner daemon can use **Sysbox** or rootless DinD-in-container.
+  Trusted types can opt in with `docker_socket`, granting root-equivalent host
+  access and mounting the per-job work folder at the same absolute path so the
+  host daemon can resolve workspace bind mounts.
 - **Per-type sandbox knobs**: stronger isolation runtimes (**gVisor / Kata
   microVM**) and **userns-remap** are available as per-runner-type escalations
   for genuinely untrusted CPU runners (Kata is the lightweight path back to

@@ -66,7 +66,10 @@ EOF
   PATH="${STUB}:/bin:/usr/bin"
 }
 
-teardown() { rm -rf "${WORK}" "${STUB}"; }
+teardown() {
+  hash -r
+  /bin/rm -rf "${WORK}" "${STUB}"
+}
 
 # Register a container in the scripted inventory: inv <id> <job-id> [managed-by].
 inv() {

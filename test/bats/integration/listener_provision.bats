@@ -496,3 +496,19 @@ assert_invalid_workdir() {
   [ ! -e "${MODE_CAP}" ]
   [ ! -e "${RUNNER_JOB_WORKDIR}" ]
 }
+
+@test "provision-job.sh rejects a socket workdir containing a dot component" {
+  socket_job
+  assert_invalid_workdir "${RUNNER_WORK_ROOT}/./jit-job-abc.0123abcd"
+}
+
+@test "provision-job.sh keeps a fresh socket work root private" {
+  socket_job
+  rmdir -- "${RUNNER_WORK_ROOT}"
+
+  run "${SCRIPT}" job-abc "$(jit_file ENC)" img
+
+  [ "${status}" -eq 0 ]
+  [ "$(stat -c %a -- "${RUNNER_WORK_ROOT}")" = 700 ]
+  [ ! -e "${RUNNER_JOB_WORKDIR}" ]
+}

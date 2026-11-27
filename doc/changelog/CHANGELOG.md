@@ -8,6 +8,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Same-path work folders for Docker socket jobs.** Socket-enabled runner
+  types use a per-job work folder mounted at the same path on the host and in
+  the runner. Compose and other sibling containers can bind-mount the checkout.
+  Job teardown and orphan cleanup remove the folder, including protected files
+  created by containers.
+
 - **Runner types can opt into the host Docker socket.** Set `docker_socket`
   on a trusted type to let its jobs use the host Docker daemon for builds,
   runs, and Compose. This grants root-equivalent host access. The provisioner

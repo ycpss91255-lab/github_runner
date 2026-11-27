@@ -70,17 +70,14 @@
 # config.sh, bin/) lives and where the job runs from. Both the self-built images
 # (images/runner-base.Dockerfile: WORKDIR /home/runner, USER runner) and the
 # official ghcr.io/actions/actions-runner image use this layout. The container
-# works from here, and NOTHING from the host is mounted over it: the per-job
-# host dir is fresh and empty (and 0700, owned by the service user, while the
-# container runs as uid 1001), so binding it here hid run.sh and every job died
-# with `./run.sh: not found` (rc 127). The job's _work and _diag therefore live
-# in the container's own writable layer, which --rm destroys with the job.
+# works from here so run.sh remains visible. _diag lives in the container's
+# writable layer. The default _work does too. Socket-enabled jobs instead use
+# an absolute work folder mounted at the same path as the per-job host dir.
 # Overridable for an image that installs the runner elsewhere.
 : "${RUNNER_CONTAINER_HOME:=/home/runner}"
 
-# runner_work_root -- the SINGLE source of truth for the per-job work root, the
-# dir provision-job.sh creates each job's runner dir under (mktemp -d
-# "<root>/jit-<id>.XXXXXX") and reap.sh prunes leaked dirs from. BOTH halves MUST
+# runner_work_root -- the per-job work root shared by provision-job.sh and
+# reap.sh. Keep it in sync with socketJobWorkDir in the listener. Both scripts must
 # agree on this path or the reaper sweeps the WRONG directory: provision-job.sh
 # would strand residue under RUNNER_HOME/work while reap.sh globbed a different
 # root and reported success having cleaned nothing (#148). Sourced by BOTH
@@ -179,8 +176,8 @@ runner_container_cli() {
 # correlate and remove orphans. PROPAGATES the in-container job's exit status (it
 # is the whole job lifecycle). The image's bundled run.sh runs from
 # RUNNER_CONTAINER_HOME inside the container. <dir> is the per-job HOST dir; it
-# is NOT mounted into the container (it only anchors the credential env-file
-# sibling below and the work-root bookkeeping the reaper sweeps).
+# is mounted at the same path for socket-enabled jobs only. The credential
+# env-file remains a sibling of the dir in either mode.
 runner_container_run() {
   local dir=$1 encoded=$2 image=$3 job_id=${4:-} cli line
   cli=$(runner_container_cli) || {
@@ -213,7 +210,11 @@ runner_container_run() {
       printf 'FAIL: cannot resolve group ID for Docker socket %s\n' "${RUNNER_DOCKER_SOCKET}" >&2
       return 1
     fi
-    socket_args=(-v "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}:Z" --group-add "${socket_gid}")
+    socket_args=(
+      -v "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}:Z"
+      -v "${dir}:${dir}:Z"
+      --group-add "${socket_gid}"
+    )
   fi
   # Precise --device passthrough (#117): one --device per declared host node, no
   # --privileged. Word-splitting RUNNER_DEVICES on whitespace is intentional so a
@@ -303,11 +304,9 @@ runner_container_run() {
   # do NOT add `--jitconfig "${JITCONFIG}"` back here -- that re-exposes it.
   local run_in_container='./run.sh'
 
-  # Work from the image's runner home, where run.sh lives. No host dir is bound
-  # over it (see RUNNER_CONTAINER_HOME): the job's state stays in the container's
-  # writable layer and --rm removes it, so nothing survives the job. MAC
-  # (SELinux/AppArmor) stays ENFORCED (#115): the only bind mount is the opt-in
-  # socket above, relabelled :Z; we never pass label=disable.
+  # Work from the image's runner home, where run.sh lives. Socket-enabled
+  # jobs have two :Z bind mounts: the socket and the absolute work folder.
+  # MAC (SELinux/AppArmor) stays enforced (#115).
   "${cli}" run --rm --init \
     "${hardening_args[@]}" \
     "${socket_args[@]}" \
@@ -318,6 +317,27 @@ runner_container_run() {
     -w "${RUNNER_CONTAINER_HOME}" \
     "${image}" \
     sh -c "${run_in_container}"
+}
+
+# runner_workdir_purge <dir> [image]
+# Try host removal first. Use the runner image to delete protected entries
+# when available. The unprivileged host user then removes the directory itself.
+runner_workdir_purge() {
+  local dir=$1 image=${2:-} cli
+  rm -rf -- "${dir}" || :
+  # Only mount a real directory with a safe volume source. Legacy temp paths
+  # can contain characters that Docker interprets as volume spec separators.
+  if [[ -d "${dir}" && ! -L "${dir}" && "${dir}" != *:* && -n "${image}" ]] &&
+      cli=$(runner_container_cli); then
+    "${cli}" run --rm --network none --user 0:0 --cap-drop=ALL \
+      --cap-add=DAC_OVERRIDE --cap-add=FOWNER --security-opt no-new-privileges \
+      -v "${dir}:/purge:Z" --entrypoint find "${image}" /purge -mindepth 1 -delete || :
+    rm -rf -- "${dir}" || :
+  fi
+  if [[ -e "${dir}" || -L "${dir}" ]]; then
+    printf 'purge: unable to remove work directory %q\n' "${dir}" >&2
+  fi
+  return 0
 }
 
 # runner_container_kill <name>

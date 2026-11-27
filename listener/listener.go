@@ -8,8 +8,13 @@ package listener
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"log"
+	"os"
+	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -92,6 +97,8 @@ type ProvisionRequest struct {
 	// DockerSocket is the host Docker socket path to mount for this job.
 	// Empty disables the mount.
 	DockerSocket string
+	// JobWorkDir is the absolute same-path work folder for socket jobs.
+	JobWorkDir string
 }
 
 // Provisioner runs one ephemeral job in a throwaway container. The production
@@ -111,8 +118,8 @@ type Provisioner interface {
 // minting on the Go side of the boundary; nothing in bash mints any more.
 type JITConfigMinter interface {
 	// Mint returns the encoded JIT config for a runner named name with the
-	// given labels (the job's requested labels).
-	Mint(ctx context.Context, name string, labels []string) (string, error)
+	// given labels (the job's requested labels). An empty workFolder uses _work.
+	Mint(ctx context.Context, name string, labels []string, workFolder string) (string, error)
 }
 
 // Reaper sweeps orphaned containers no longer tracked by the listener (#105),
@@ -234,6 +241,7 @@ type Listener struct {
 	reserve float64 // fraction in [0,1]; the per-resource headroom kept free
 	settle  time.Duration
 
+	reapMu    sync.Mutex     // keeps new socket workdirs out of a sweep with an older tracked snapshot
 	trackedMu sync.Mutex     // guards tracked
 	tracked   map[string]int // canonical job id -> count of in-flight jobs sharing it (spared by the reaper, #105/#147)
 
@@ -476,29 +484,43 @@ func (l *Listener) reconcile(ctx context.Context, stats *scaleset.RunnerScaleSet
 		} else {
 			job.JobID = "runner-" + uuid.NewString()
 		}
+		jobID := canonicalJobID(job.JobID)
+		req := assignedRequest{
+			rawJobID: job.JobID,
+			ProvisionRequest: ProvisionRequest{
+				JobID:        jobID,
+				RequestID:    job.RunnerRequestID,
+				Labels:       job.RequestLabels,
+				Image:        l.cfg.Image,
+				Devices:      l.cfg.Devices,
+				Runtime:      l.cfg.Runtime,
+				BuildTool:    l.cfg.BuildTool,
+				DockerSocket: l.cfg.DockerSocket,
+			},
+		}
+		if l.cfg.DockerSocket != "" {
+			workDir, err := socketJobWorkDir(jobID)
+			if err != nil {
+				<-l.sem
+				if hasAssignment {
+					pending = pending[1:]
+					l.releaseAssignment(req.rawJobID)
+				}
+				l.reportJobErr(req.ProvisionRequest, err)
+				continue
+			}
+			req.JobWorkDir = workDir
+		}
 		// Once minting starts, finish the bounded request and dispatch on
 		// success even if shutdown begins during the request.
 		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.cfg.RequestTimeout)
-		jit, err := l.minter.Mint(requestCtx, job.JobID, job.RequestLabels)
+		jit, err := l.minter.Mint(requestCtx, job.JobID, job.RequestLabels, req.JobWorkDir)
 		cancel()
 		if err != nil {
 			<-l.sem
 			return err
 		}
-		req := assignedRequest{
-			rawJobID: job.JobID,
-			ProvisionRequest: ProvisionRequest{
-				JobID:            canonicalJobID(job.JobID),
-				RequestID:        job.RunnerRequestID,
-				Labels:           job.RequestLabels,
-				EncodedJITConfig: jit,
-				Image:            l.cfg.Image,
-				Devices:          l.cfg.Devices,
-				Runtime:          l.cfg.Runtime,
-				BuildTool:        l.cfg.BuildTool,
-				DockerSocket:     l.cfg.DockerSocket,
-			},
-		}
+		req.EncodedJITConfig = jit
 		if hasAssignment {
 			pending = pending[1:]
 		}
@@ -593,6 +615,36 @@ func (l *Listener) reportCapacity() {
 	})
 }
 
+var socketJobIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// socketJobWorkDir names the work folder before minting. The provisioner
+// creates it after the job is tracked, so the orphan sweep can spare it.
+func socketJobWorkDir(jobID string) (string, error) {
+	if jobID == "." || jobID == ".." || !socketJobIDPattern.MatchString(jobID) {
+		return "", errors.New("invalid job ID for Docker socket work directory")
+	}
+	root := os.Getenv("RUNNER_WORK_ROOT")
+	if root == "" {
+		home := os.Getenv("RUNNER_HOME")
+		if home == "" {
+			// The installed binary (bin/) and provisioning script (listener/)
+			// both sit one level below the default runner state tree's parent.
+			exe, err := os.Executable()
+			if err != nil {
+				return "", err
+			}
+			home = filepath.Join(filepath.Dir(exe), "..", "runners")
+		}
+		root = strings.TrimSuffix(home, "/") + "/work"
+	}
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root {
+		return "", errors.New("Docker socket work root must be absolute and normalized")
+	}
+	var suffix [8]byte
+	rand.Read(suffix[:])
+	return filepath.Join(root, "jit-"+jobID+"."+hex.EncodeToString(suffix[:])), nil
+}
+
 // canonicalJobID normalizes the attacker-influenced scale-set JobID to the SAME
 // canonical form the per-job container's job-id label carries (#138). The label
 // is produced by lib/runner-container.sh runner_job_id_label = `tr -d
@@ -629,6 +681,10 @@ func canonicalJobID(jobID string) string {
 // reaper (rm -f mid-job). Counting keeps the key tracked until the LAST live
 // job sharing it finishes.
 func (l *Listener) track(jobID string) {
+	if l.cfg.DockerSocket != "" {
+		l.reapMu.Lock()
+		defer l.reapMu.Unlock()
+	}
 	l.trackedMu.Lock()
 	l.tracked[jobID]++
 	l.trackedMu.Unlock()
@@ -666,6 +722,8 @@ func (l *Listener) reap(ctx context.Context) {
 	if l.cfg.Reaper == nil {
 		return
 	}
+	l.reapMu.Lock()
+	defer l.reapMu.Unlock()
 	if err := l.cfg.Reaper.Reap(ctx, l.trackedJobIDs()); err != nil {
 		log.Printf("orphan reap failed (sweep skipped, listener continues): %v", err)
 	}

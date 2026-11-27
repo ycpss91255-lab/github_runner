@@ -135,3 +135,39 @@ assert_purge_argv() {
   assert_purge_argv prune-image
   [ ! -e "${JOB_DIR}" ]
 }
+
+@test "runner_workdir_purge reports protected entries when the CLI is unavailable" {
+  block_host_rm
+  runner_container_cli() { return 1; }
+
+  run runner_workdir_purge "${JOB_DIR}" job-image
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"unable to remove work directory"* ]]
+  [ -f "${JOB_DIR}/locked" ]
+  [ ! -e "${CLI_ARGS}" ]
+}
+
+@test "runner_workdir_purge skips the CLI for a legacy path containing a colon" {
+  mv -- "${JOB_DIR}" "${JOB_DIR}:legacy"
+  JOB_DIR+=:legacy
+  block_host_rm
+
+  run runner_workdir_purge "${JOB_DIR}" job-image
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"unable to remove work directory"* ]]
+  [ -f "${JOB_DIR}/locked" ]
+  [ ! -e "${CLI_ARGS}" ]
+}
+
+@test "runner_workdir_purge never mounts a surviving symlink" {
+  local target="${BATS_TEST_TMPDIR}/outside"
+  mv -- "${JOB_DIR}" "${target}"
+  ln -s -- "${target}" "${JOB_DIR}"
+  block_host_rm
+
+  run runner_workdir_purge "${JOB_DIR}" job-image
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"unable to remove work directory"* ]]
+  [ -f "${target}/locked" ]
+  [ ! -e "${CLI_ARGS}" ]
+}

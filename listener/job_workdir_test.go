@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -257,12 +256,7 @@ func TestScriptReaperPassesPurgeImage(t *testing.T) {
 	reaper := &ScriptReaper{Script: writeScript(t, `#!/usr/bin/env bash
 printf '%s\n' "${RUNNER_PURGE_IMAGE-unset}" "$@" > "${WORKDIR_TEST_CAPTURE}"
 `)}
-	// Configure the proposed per-type image field while keeping the red step
-	// buildable before that field exists.
-	field := reflect.ValueOf(reaper).Elem().FieldByName("Image")
-	if field.IsValid() {
-		field.SetString(image)
-	}
+	reaper.Image = image
 	if err := reaper.Reap(context.Background(), []string{"job-A.b_1"}); err != nil {
 		t.Fatal(err)
 	}
