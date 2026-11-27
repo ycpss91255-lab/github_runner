@@ -14,8 +14,13 @@ import (
 // interface-stub pattern the Session / Provisioner seams use, so the create /
 // delete logic is exercised without credentials or a real scale set.
 type stubAdmin struct {
-	// sets is the fake server state, keyed by scale set name.
-	sets map[string]*scaleset.RunnerScaleSet
+	// sets is the fake server state. Names are unique only WITHIN a runner
+	// group, exactly as on GitHub, so two groups may each hold a set with the
+	// same name -- the high-availability layout this repo deploys.
+	sets []*scaleset.RunnerScaleSet
+	// lookups records the runner group id of every GetRunnerScaleSet call, so a
+	// test can assert no lookup ever searched across groups (id 0).
+	lookups []int
 	// groups maps a runner group name to its id; a name absent here is
 	// reported the way the real client reports an unknown group.
 	groups map[string]int
@@ -35,23 +40,43 @@ type stubAdmin struct {
 
 func newStubAdmin() *stubAdmin {
 	return &stubAdmin{
-		sets:   map[string]*scaleset.RunnerScaleSet{},
 		groups: map[string]int{DefaultRunnerGroup: 1},
 		nextID: 100,
 	}
 }
 
 // GetRunnerScaleSet mirrors the real client's contract exactly, including the
-// part that matters most here: a scale set that does not exist is reported as
-// (nil, nil), NOT as an error.
-func (s *stubAdmin) GetRunnerScaleSet(_ context.Context, _ int, name string) (*scaleset.RunnerScaleSet, error) {
+// parts that matter most here: a scale set that does not exist is reported as
+// (nil, nil), NOT as an error; group id 0 searches every group; and a name
+// matching more than one set is an error ("multiple runner scale sets found").
+func (s *stubAdmin) GetRunnerScaleSet(_ context.Context, groupID int, name string) (*scaleset.RunnerScaleSet, error) {
+	s.lookups = append(s.lookups, groupID)
 	if s.getErr != nil {
 		return nil, s.getErr
 	}
-	if set, ok := s.sets[name]; ok {
-		return set, nil
+	var found []*scaleset.RunnerScaleSet
+	for _, set := range s.sets {
+		if set.Name == name && (groupID == 0 || set.RunnerGroupID == groupID) {
+			found = append(found, set)
+		}
 	}
-	return nil, nil
+	switch len(found) {
+	case 0:
+		return nil, nil
+	case 1:
+		return found[0], nil
+	default:
+		return nil, errors.New("multiple runner scale sets found with name " + name)
+	}
+}
+
+// seed puts a scale set straight into the fake server state, in a group.
+func (s *stubAdmin) seed(id, groupID int, name string, labels ...string) {
+	set := &scaleset.RunnerScaleSet{ID: id, Name: name, RunnerGroupID: groupID}
+	for _, l := range labels {
+		set.Labels = append(set.Labels, scaleset.Label{Name: l, Type: "System"})
+	}
+	s.sets = append(s.sets, set)
 }
 
 func (s *stubAdmin) GetRunnerGroupByName(_ context.Context, name string) (*scaleset.RunnerGroup, error) {
@@ -73,7 +98,7 @@ func (s *stubAdmin) CreateRunnerScaleSet(_ context.Context, set *scaleset.Runner
 	made := *set
 	made.ID = s.nextID
 	s.nextID++
-	s.sets[made.Name] = &made
+	s.sets = append(s.sets, &made)
 	return &made, nil
 }
 
@@ -82,11 +107,13 @@ func (s *stubAdmin) DeleteRunnerScaleSet(_ context.Context, id int) error {
 		return s.deleteErr
 	}
 	s.deleted = append(s.deleted, id)
-	for name, set := range s.sets {
-		if set.ID == id {
-			delete(s.sets, name)
+	kept := s.sets[:0]
+	for _, set := range s.sets {
+		if set.ID != id {
+			kept = append(kept, set)
 		}
 	}
+	s.sets = kept
 	return nil
 }
 
@@ -264,11 +291,7 @@ func TestEnsureScaleSetIsIdempotent(t *testing.T) {
 // another -- the exact way jobs end up never being dispatched.
 func TestEnsureScaleSetReportsLabelDrift(t *testing.T) {
 	admin := newStubAdmin()
-	admin.sets["gpu-runners"] = &scaleset.RunnerScaleSet{
-		ID:     42,
-		Name:   "gpu-runners",
-		Labels: []scaleset.Label{{Name: "gpu-runners", Type: "System"}},
-	}
+	admin.seed(42, 1, "gpu-runners", "gpu-runners")
 
 	res, err := EnsureScaleSet(context.Background(), admin, gpuType(), "")
 	if err != nil {
@@ -310,7 +333,7 @@ func TestDeleteScaleSetRemovesByResolvedID(t *testing.T) {
 		t.Fatalf("EnsureScaleSet: %v", err)
 	}
 
-	res, err := DeleteScaleSet(context.Background(), admin, gpuType())
+	res, err := DeleteScaleSet(context.Background(), admin, gpuType(), "")
 	if err != nil {
 		t.Fatalf("DeleteScaleSet: %v", err)
 	}
@@ -327,7 +350,7 @@ func TestDeleteScaleSetRemovesByResolvedID(t *testing.T) {
 func TestDeleteScaleSetAbsentIsNoOp(t *testing.T) {
 	admin := newStubAdmin()
 
-	res, err := DeleteScaleSet(context.Background(), admin, gpuType())
+	res, err := DeleteScaleSet(context.Background(), admin, gpuType(), "")
 	if err != nil {
 		t.Fatalf("DeleteScaleSet: %v", err)
 	}
@@ -347,7 +370,7 @@ func TestDeleteScaleSetAbsentIsNoOp(t *testing.T) {
 func TestResolveScaleSetAbsentIsAnActionableError(t *testing.T) {
 	admin := newStubAdmin()
 
-	_, err := ResolveScaleSet(context.Background(), admin, "gpu-runners")
+	_, err := ResolveScaleSet(context.Background(), admin, "gpu-runners", "")
 	if err == nil {
 		t.Fatal("an absent scale set must be an error, not a nil dereference")
 	}
@@ -366,7 +389,7 @@ func TestResolveScaleSetFound(t *testing.T) {
 		t.Fatalf("EnsureScaleSet: %v", err)
 	}
 
-	set, err := ResolveScaleSet(context.Background(), admin, "gpu-runners")
+	set, err := ResolveScaleSet(context.Background(), admin, "gpu-runners", "")
 	if err != nil {
 		t.Fatalf("ResolveScaleSet: %v", err)
 	}
@@ -452,6 +475,9 @@ func TestDescribeType(t *testing.T) {
 		"labels":     "self-hosted,linux,gpu",
 		"image":      "ghcr.io/acme/gpu-runner@sha256:abc",
 		"runs_on":    "runs-on: [self-hosted, linux, gpu]",
+		// No runner_group configured: the report states the group the type
+		// actually resolves to, so the deploy tooling never has to guess.
+		"runner_group": DefaultRunnerGroup,
 	}
 	for k, v := range want {
 		if got[k] != v {
@@ -477,5 +503,228 @@ func TestDescribeTypeReportsTheEffectiveRoutingLabels(t *testing.T) {
 	}
 	if got["runs_on"] != "runs-on: gpu-runners" {
 		t.Errorf("runs_on = %q, want %q", got["runs_on"], "runs-on: gpu-runners")
+	}
+}
+
+// --- runner groups: the high-availability layout ---------------------------
+//
+// GitHub's documented failover pattern for runner scale sets is the SAME scale
+// set name in DIFFERENT runner groups: one group per host, every host's set
+// named `cpu`, identical labels. A job assigned to a scale set whose listener is
+// down waits for that listener; spreading the name across groups is what lets
+// another host's listener take the work. That makes a lookup "across all
+// groups" (id 0) ambiguous, so every lookup here is pinned to one group.
+
+// haAdmin is a fake org laid out the HA way: groups ci-kai (7) and ci-samuel
+// (8), each holding a scale set named "cpu".
+func haAdmin() *stubAdmin {
+	admin := newStubAdmin()
+	admin.groups["ci-kai"] = 7
+	admin.groups["ci-samuel"] = 8
+	admin.seed(70, 7, "cpu", "self-hosted", "linux", "cpu")
+	admin.seed(80, 8, "cpu", "self-hosted", "linux", "cpu")
+	return admin
+}
+
+func haCPUType(group string) RunnerType {
+	return RunnerType{
+		Name:        "cpu",
+		ScaleSet:    "cpu",
+		Labels:      []string{"self-hosted", "linux", "cpu"},
+		Image:       "ghcr.io/acme/cpu@sha256:abc",
+		RunnerGroup: group,
+	}
+}
+
+// noCrossGroupLookup fails the test if any lookup searched across groups.
+func noCrossGroupLookup(t *testing.T, admin *stubAdmin) {
+	t.Helper()
+	for _, id := range admin.lookups {
+		if id == 0 {
+			t.Errorf("a scale set lookup used runner group id 0 (all groups): %v", admin.lookups)
+			return
+		}
+	}
+}
+
+// Two groups each hold a set named cpu: the listener resolves the one in ITS
+// configured group, not whichever the server happens to match first (and not
+// the "multiple scale sets" error a cross-group search gets).
+func TestResolveScaleSetPicksTheConfiguredGroupsSet(t *testing.T) {
+	admin := haAdmin()
+
+	set, err := ResolveScaleSet(context.Background(), admin, "cpu", "ci-samuel")
+	if err != nil {
+		t.Fatalf("ResolveScaleSet: %v", err)
+	}
+	if set.ID != 80 {
+		t.Errorf("resolved scale set id %d, want 80 (the ci-samuel one)", set.ID)
+	}
+	noCrossGroupLookup(t, admin)
+}
+
+// No group configured means the Default group -- resolved by name, never a
+// cross-group search -- so an existing single-group install keeps working.
+func TestResolveScaleSetEmptyGroupMeansDefault(t *testing.T) {
+	admin := haAdmin()
+	admin.seed(10, 1, "cpu", "self-hosted", "linux", "cpu")
+
+	set, err := ResolveScaleSet(context.Background(), admin, "cpu", "")
+	if err != nil {
+		t.Fatalf("ResolveScaleSet: %v", err)
+	}
+	if set.ID != 10 {
+		t.Errorf("resolved scale set id %d, want 10 (the Default-group one)", set.ID)
+	}
+	noCrossGroupLookup(t, admin)
+}
+
+// A runner group that does not exist is a clear error naming it -- not a
+// fall-back to searching every group.
+func TestResolveScaleSetUnknownGroupFails(t *testing.T) {
+	admin := haAdmin()
+
+	_, err := ResolveScaleSet(context.Background(), admin, "cpu", "ci-nobody")
+	if err == nil {
+		t.Fatal("an unknown runner group must fail")
+	}
+	if !strings.Contains(err.Error(), "ci-nobody") {
+		t.Errorf("error should name the group, got %v", err)
+	}
+	if len(admin.lookups) != 0 {
+		t.Errorf("no scale set lookup may run when the group is unknown, got %v", admin.lookups)
+	}
+}
+
+// A set that exists in another group but not this one is "absent here": the
+// error names both the set and the group, so the operator knows where to look.
+func TestResolveScaleSetAbsentInGroupNamesTheGroup(t *testing.T) {
+	admin := haAdmin()
+	admin.groups["ci-nuc-002"] = 9
+
+	_, err := ResolveScaleSet(context.Background(), admin, "cpu", "ci-nuc-002")
+	if err == nil {
+		t.Fatal("a set absent from the configured group must be an error")
+	}
+	if !strings.Contains(err.Error(), "ci-nuc-002") || !strings.Contains(err.Error(), "cpu") {
+		t.Errorf("error should name the scale set and the group, got %v", err)
+	}
+}
+
+// EnsureScaleSet creates in the type's runner_group when no --group is given,
+// even though another group already holds a set with the same name.
+func TestEnsureScaleSetCreatesInTheTypesRunnerGroup(t *testing.T) {
+	admin := haAdmin()
+	admin.groups["ci-nuc-002"] = 9
+
+	res, err := EnsureScaleSet(context.Background(), admin, haCPUType("ci-nuc-002"), "")
+	if err != nil {
+		t.Fatalf("EnsureScaleSet: %v", err)
+	}
+	if !res.Created {
+		t.Fatal("a set absent from ci-nuc-002 must be created there, not reported as existing elsewhere")
+	}
+	if len(admin.created) != 1 || admin.created[0].RunnerGroupID != 9 {
+		t.Errorf("created = %+v, want one create in group 9", admin.created)
+	}
+	if admin.created[0].RunnerGroupName != "ci-nuc-002" {
+		t.Errorf("RunnerGroupName = %q, want ci-nuc-002", admin.created[0].RunnerGroupName)
+	}
+	noCrossGroupLookup(t, admin)
+}
+
+// Re-running create for a host whose group already holds the set is the
+// idempotent no-op, and it reports THAT group's set.
+func TestEnsureScaleSetIsIdempotentWithinTheGroup(t *testing.T) {
+	admin := haAdmin()
+
+	res, err := EnsureScaleSet(context.Background(), admin, haCPUType("ci-kai"), "")
+	if err != nil {
+		t.Fatalf("EnsureScaleSet: %v", err)
+	}
+	if res.Created || res.ID != 70 {
+		t.Errorf("res = %+v, want the existing ci-kai set (id 70), not created", res)
+	}
+	if len(admin.created) != 0 {
+		t.Error("an existing set must not be re-created")
+	}
+	noCrossGroupLookup(t, admin)
+}
+
+// A --group flag equal to the configured runner_group is fine; one that
+// DIFFERS is an error with nothing looked up or created -- the config says one
+// group and the flag another, and guessing which one is meant is how a set
+// lands where the listener will never look for it.
+func TestEnsureScaleSetFlagAndFieldConflict(t *testing.T) {
+	admin := haAdmin()
+
+	if _, err := EnsureScaleSet(context.Background(), admin, haCPUType("ci-kai"), "ci-kai"); err != nil {
+		t.Fatalf("an agreeing --group must be accepted: %v", err)
+	}
+
+	admin = haAdmin()
+	_, err := EnsureScaleSet(context.Background(), admin, haCPUType("ci-kai"), "ci-samuel")
+	if err == nil {
+		t.Fatal("a --group that differs from runner_group must fail")
+	}
+	if !strings.Contains(err.Error(), "ci-kai") || !strings.Contains(err.Error(), "ci-samuel") {
+		t.Errorf("error should name both groups, got %v", err)
+	}
+	if len(admin.created) != 0 || len(admin.lookups) != 0 {
+		t.Error("nothing may be looked up or created on a group conflict")
+	}
+}
+
+// Delete removes the set in the type's group and leaves the same-named set in
+// every other group alone.
+func TestDeleteScaleSetDeletesOnlyTheGroupsSet(t *testing.T) {
+	admin := haAdmin()
+
+	res, err := DeleteScaleSet(context.Background(), admin, haCPUType("ci-kai"), "")
+	if err != nil {
+		t.Fatalf("DeleteScaleSet: %v", err)
+	}
+	if !res.Deleted || len(admin.deleted) != 1 || admin.deleted[0] != 70 {
+		t.Errorf("deleted = %v (res %+v), want exactly [70]", admin.deleted, res)
+	}
+	noCrossGroupLookup(t, admin)
+
+	if _, err := DeleteScaleSet(context.Background(), haAdmin(), haCPUType("ci-kai"), "ci-samuel"); err == nil {
+		t.Error("delete with a --group that differs from runner_group must fail")
+	}
+}
+
+// ResolveGroupName is the one rule both create/delete and the plan output use.
+func TestResolveGroupName(t *testing.T) {
+	for _, tc := range []struct {
+		field, flag, want string
+		wantErr           bool
+	}{
+		{"", "", DefaultRunnerGroup, false},
+		{"", "ci-kai", "ci-kai", false},
+		{"ci-kai", "", "ci-kai", false},
+		{"ci-kai", "ci-kai", "ci-kai", false},
+		{"ci-kai", "ci-samuel", "", true},
+	} {
+		got, err := ResolveGroupName(haCPUType(tc.field), tc.flag)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("ResolveGroupName(field=%q, flag=%q) error = %v, wantErr %v", tc.field, tc.flag, err, tc.wantErr)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("ResolveGroupName(field=%q, flag=%q) = %q, want %q", tc.field, tc.flag, got, tc.want)
+		}
+	}
+}
+
+// show reports the configured runner_group verbatim.
+func TestDescribeTypeReportsTheRunnerGroup(t *testing.T) {
+	got := map[string]string{}
+	for _, line := range DescribeType(haCPUType("ci-kai")) {
+		k, v, _ := strings.Cut(line, "=")
+		got[k] = v
+	}
+	if got["runner_group"] != "ci-kai" {
+		t.Errorf("runner_group = %q, want ci-kai", got["runner_group"])
 	}
 }

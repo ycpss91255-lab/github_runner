@@ -156,6 +156,7 @@ case "\${1:-}" in
     printf '%s\n' "name=\${type}" "scale_set=\${type}-runners" "labels=self-hosted,linux,\${type}"
     echo 'image=ghcr.io/acme/r@sha256:abc'
     echo "runs_on=runs-on: [self-hosted, linux, \${type}]"
+    [ -z "\${STUB_RUNNER_GROUP:-}" ] || echo "runner_group=\${STUB_RUNNER_GROUP}"
     ;;
   create)
     # The real command reads GITHUB_TOKEN from the environment and refuses
@@ -813,4 +814,35 @@ _assert_migration_failure_note() {
   [ "${status}" -eq 0 ]
   [[ "${output}" == *"scaleset-listener-gc.timer"* ]]
   [ ! -e "${LISTENER_UNIT_DIR}/scaleset-listener-gc.timer" ]
+}
+
+# --- runner group ------------------------------------------------------------
+# HA layout: the same scale set name in one runner group per host. The group is
+# part of which scale set this host serves, so the create must land in the
+# type's configured group even when the operator passes no --group.
+
+# The argv of the scaleset-admin create call, one token per line.
+_create_argv() {
+  awk '/^name=/ { on = ($0 == "name=scaleset-admin"); first = 1; next }
+       on && first { first = 0; is_create = ($0 == "create") }
+       on && is_create { print }' "${CAP}"
+}
+
+@test "a full run creates the scale set in the type's runner_group when --group is omitted" {
+  export STUB_RUNNER_GROUP=ci-kai
+  run _deploy
+  [ "${status}" -eq 0 ]
+  _create_argv | grep -qxF -- '--group'
+  [ "$(_create_argv | grep -A1 -xF -- '--group' | tail -1)" = "ci-kai" ]
+}
+
+@test "a full run with --group records the group in the generated per-type config" {
+  # The listener resolves its scale set in the CONFIG's group, so a --group that
+  # only reached the create would leave the listener looking somewhere else.
+  export STUB_RUNNER_GROUP=Default
+  run _deploy --group ci-samuel
+  [ "${status}" -eq 0 ]
+  [ "$(_create_argv | grep -A1 -xF -- '--group' | tail -1)" = "ci-samuel" ]
+  grep -q '^    runner_group: ci-samuel$' "${ETC}/runner-types-gpu.yaml"
+  grep -qxF "RUNNER_TYPES_CONFIG=${ETC}/runner-types-gpu.yaml" "${ETC}/gpu.env"
 }
