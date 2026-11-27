@@ -46,6 +46,30 @@ teardown() { rm -rf "${RUNNER_HOME}" "${STUB}"; }
   grep -A1 -xF -- '--group-add' "${CAP}" | grep -qxF -- "${gid}"
 }
 
+@test "runner_container_run adds the gid of the symlink target when the Docker socket path is a symlink" {
+  export RUNNER_DOCKER_SOCKET="${BATS_TEST_TMPDIR}/linked.sock"
+  ln -s "${SOCKET}" "${RUNNER_DOCKER_SOCKET}"
+
+  # Model distinct link and target gids without requiring chgrp privileges.
+  cat >"${STUB}/stat" <<'STUB_EOF'
+#!/usr/bin/env bash
+[[ "${!#}" == "${RUNNER_DOCKER_SOCKET}" && -L "${!#}" && -e "${!#}" ]] || exit 1
+for arg in "$@"; do
+  case "${arg}" in
+    -L|--dereference) printf '%s\n' 4242; exit 0 ;;
+  esac
+done
+printf '%s\n' 0
+STUB_EOF
+  chmod +x "${STUB}/stat"
+
+  run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
+  [ "${status}" -eq 0 ]
+  grep -A1 -xF -- '-v' "${CAP}" | grep -qxF -- "${RUNNER_DOCKER_SOCKET}:${RUNNER_DOCKER_SOCKET}:Z"
+  [ "$(grep -cE -- '^--group-add(=|$)' "${CAP}")" -eq 1 ]
+  grep -A1 -xF -- '--group-add' "${CAP}" | grep -qxF -- '4242'
+}
+
 @test "runner_container_run preserves hardening with the Docker socket enabled" {
   export RUNNER_DOCKER_SOCKET="${SOCKET}"
   run runner_container_run "${RUNNER_DIR}" ENC my/image:tag
