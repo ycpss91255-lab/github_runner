@@ -92,22 +92,28 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
-- **The scale-set listener acquires available jobs after acknowledging the envelope.**
-  Acquisition batches valid availability request IDs. Assignment events mint
-  and provision by job ID, including assignments with a zero request ID.
-  Duplicate raw job IDs are skipped while an assignment is pending dispatch
-  or running. On SIGTERM the listener finishes acquisition and minting for
-  the acknowledged envelope, drains its workers, and closes the session with
-  a fresh bounded context. It exits successfully when cleanup succeeds.
+- **The scale-set listener avoids the 404 from acquiring request ID 0.**
+  It acquires valid available request IDs in one batch after acknowledging the
+  envelope, matching [upstream v0.4.0 `handleMessage`](https://github.com/actions/scaleset/blob/v0.4.0/listener/listener.go).
+  This is a partial fix for #134. Job delivery to the JIT runner remains under
+  investigation.
+  The listener mints each assignment's JIT config after admission and just
+  before dispatch, including assignments with a zero request ID. Duplicate raw
+  job IDs are skipped while an assignment is pending dispatch or running.
+  Acquisition and mint requests each have a 30-second timeout by default.
+  On SIGTERM the listener still acquires available jobs for the acknowledged
+  envelope, skips minting for assignments still waiting for admission or a
+  worker slot, drains its workers, and closes the session with a fresh bounded
+  context.
 - **Listener deployment fills in the scale-set owner and installed script paths.**
   Reruns backfill absent or empty settings while preserving non-empty values
-  and reusing the stored token. Deriving the owner requires an owner segment
-  in the target URL. Deployment warns to rotate a potentially exposed token
-  before restoring an existing environment file to mode 0600.
+  and reusing the stored token. The session owner defaults to the output of
+  `hostname`. Deployment fails if it needs this default and the output is empty.
+  Deployment warns to rotate a potentially exposed token before restoring an
+  existing environment file to mode 0600.
 - **Job provisioning writes the default history ledger under the runner home.**
   The provisioner resolves the runner home before loading the history library,
   so the default ledger is `RUNNER_HOME/history/ledger.tsv`.
-
 
 - **Listener jobs no longer fail with `./run.sh: not found`.** The per-job
   container bound the fresh, empty per-job host dir over `/runner` and ran

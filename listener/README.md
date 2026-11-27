@@ -131,7 +131,7 @@ docker run --rm -e GITHUB_CONFIG_URL -e GITHUB_TOKEN -e SCALE_SET_NAME \
 | Env | Meaning |
 | --- | --- |
 | `GITHUB_CONFIG_URL` | GitHub organization or repository URL (required) |
-| `SCALE_SET_OWNER` | owner sent when creating the session (deploy derives it from the target URL) |
+| `SCALE_SET_OWNER` | session owner (deployment defaults to the output of `hostname`) |
 | `GITHUB_TOKEN` | token with scale-set admin scope (required) |
 | `SCALE_SET_NAME` | the scale set to connect to, **by name** (required). An identifier, not the runs-on target -- see above |
 | `RUNNER_IMAGE` | per-job container image (default `ghcr.io/actions/actions-runner:latest`) |

@@ -145,6 +145,9 @@ type HostProbe interface {
 
 // Config holds the listener's static knobs.
 type Config struct {
+	// RequestTimeout bounds each AcquireJobs and Mint request. Zero defaults
+	// to 30 seconds.
+	RequestTimeout time.Duration
 	// DeviceDetector, when set and no explicit MaxRunners overrides it,
 	// auto-sizes the worker-pool bound from the detected device count (#103).
 	// A detection error or a non-positive count falls back to defaultPoolBound.
@@ -242,6 +245,9 @@ type Listener struct {
 // sized to it.
 func New(session Session, minter JITConfigMinter, prov Provisioner, cfg Config) *Listener {
 	bound := resolveBound(cfg)
+	if cfg.RequestTimeout <= 0 {
+		cfg.RequestTimeout = 30 * time.Second
+	}
 	reserve := float64(defaultReservePercent) / 100
 	if cfg.Reserve > 0 {
 		reserve = float64(cfg.Reserve) / 100
@@ -293,10 +299,11 @@ func resolveBound(cfg Config) int {
 }
 
 // Listen polls for messages with locally derived spare capacity. It acknowledges
-// each envelope before acquiring its available jobs in one batch. Each assigned
-// job gets its own JIT config and is dispatched to the bounded worker pool.
-// Provisioning failures are reported per job. Listener cancellation ends polling
-// cleanly, then Listen drains workers and closes the session.
+// each envelope before acquiring its available jobs in one bounded request,
+// even during shutdown. While active, it admits each assignment to the worker
+// pool before minting its JIT config and dispatching it. Mint errors end Listen;
+// provisioning failures are reported per job. On exit, Listen drains workers
+// and closes the session.
 func (l *Listener) Listen(ctx context.Context) (err error) {
 	defer func() {
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
@@ -351,19 +358,12 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 			return err
 		}
 		lastMessageID = msg.MessageID
-		// Finish processing the acknowledged envelope even if shutdown begins.
-		envelopeCtx := context.WithoutCancel(ctx)
-		if err := l.acquire(envelopeCtx, msg.JobAvailableMessages); err != nil {
+		if err := l.acquire(ctx, msg.JobAvailableMessages); err != nil {
 			return err
 		}
-		reqs, err := l.mintAssignments(envelopeCtx, msg.JobAssignedMessages)
-		if err != nil {
+		if err := l.provision(ctx, msg.JobAssignedMessages); err != nil {
 			return err
 		}
-
-		// Provisioning is per-job isolated: a failed job is logged and the loop
-		// carries on; it never ends Listen.
-		l.provision(ctx, reqs)
 	}
 }
 
@@ -379,7 +379,9 @@ func (l *Listener) acquire(ctx context.Context, jobs []*scaleset.JobAvailable) e
 	if len(requestIDs) == 0 {
 		return nil
 	}
-	_, err := l.session.AcquireJobs(ctx, requestIDs)
+	requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.cfg.RequestTimeout)
+	defer cancel()
+	_, err := l.session.AcquireJobs(requestCtx, requestIDs)
 	return err
 }
 
@@ -404,88 +406,83 @@ func (l *Listener) releaseAssignment(rawJobID string) {
 	l.assignedMu.Unlock()
 }
 
-// mintAssignments creates a provisioning request for each new assignment.
-func (l *Listener) mintAssignments(ctx context.Context, jobs []*scaleset.JobAssigned) ([]assignedRequest, error) {
-	var reqs []assignedRequest
-	for _, ja := range jobs {
-		if ja == nil {
+// provision reserves the envelope's unique assignments, then mints and
+// dispatches each one once a worker slot is available. Workers own their
+// reservations after dispatch; shutdown or a mint failure releases the rest.
+func (l *Listener) provision(ctx context.Context, jobs []*scaleset.JobAssigned) error {
+	var pending []*scaleset.JobAssigned
+	for _, job := range jobs {
+		if job == nil {
 			continue
 		}
-		if !l.reserveAssignment(ja.JobID) {
-			log.Printf("skipping duplicate assignment for job %q", ja.JobID)
+		if !l.reserveAssignment(job.JobID) {
+			log.Printf("skipping duplicate assignment for job %q", job.JobID)
 			continue
 		}
-		// Mint the single-use JIT config for this job via the Go client
-		// (ADR-0001: minting lives on the Go side of the boundary).
-		jit, err := l.minter.Mint(ctx, ja.JobID, ja.RequestLabels)
-		if err != nil {
-			l.releaseAssignment(ja.JobID)
-			for _, req := range reqs {
-				l.releaseAssignment(req.rawJobID)
-			}
-			return nil, err
-		}
-		reqs = append(reqs, assignedRequest{
-			rawJobID: ja.JobID,
-			ProvisionRequest: ProvisionRequest{
-				JobID:            canonicalJobID(ja.JobID),
-				RequestID:        ja.RunnerRequestID,
-				Labels:           ja.RequestLabels,
-				EncodedJITConfig: jit,
-				Image:            l.cfg.Image,
-				Devices:          l.cfg.Devices,
-				Runtime:          l.cfg.Runtime,
-				BuildTool:        l.cfg.BuildTool,
-			},
-		})
+		pending = append(pending, job)
 	}
-	return reqs, nil
-}
-
-// provision dispatches the per-job container for each assigned job into the
-// bounded worker pool (#101): each job runs in its own goroutine, gated by the
-// counting semaphore so no more than `bound` run at once. Dispatch BLOCKS only
-// while every slot is taken (back-pressure) -- otherwise it returns immediately
-// so the listen loop keeps long-polling. A job's failure (non-zero container
-// exit) is an ISOLATED, per-job outcome: it is reported via OnJobErr and the
-// other jobs are unaffected. It never ends the listen loop or closes the
-// session -- only genuine transport/session errors do that. Every dispatched
-// job is tracked on the WaitGroup so a clean shutdown drains them.
-func (l *Listener) provision(ctx context.Context, reqs []assignedRequest) {
 	defer func() {
-		for _, req := range reqs {
-			l.releaseAssignment(req.rawJobID)
+		for _, job := range pending {
+			l.releaseAssignment(job.JobID)
 		}
 	}()
-	for len(reqs) > 0 {
+
+	for len(pending) > 0 {
 		if ctx.Err() != nil {
-			return
+			return nil
 		}
 		// Reactive gate (ADR-0005, #163): a single message can carry a whole
 		// matrix, so the per-poll capacity report cannot brake mid-batch -- this
 		// does. Block until the host has reserve headroom for one more job, or
 		// bail out cleanly on shutdown. No-op for probe-less (device/fixed) types.
 		if l.probe != nil && !l.admitOne(ctx) {
-			return
+			return nil
 		}
 		// Acquire a worker slot (back-pressure when the pool is full). Honour
 		// cancellation so shutdown does not block forever waiting for a slot.
 		select {
 		case l.sem <- struct{}{}:
 		case <-ctx.Done():
-			return
+			return nil
 		}
-		req := reqs[0]
-		reqs = reqs[1:]
+		if ctx.Err() != nil {
+			<-l.sem
+			return nil
+		}
+
+		job := pending[0]
+		// Once minting starts, finish the bounded request and dispatch on
+		// success even if shutdown begins during the request.
+		requestCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.cfg.RequestTimeout)
+		jit, err := l.minter.Mint(requestCtx, job.JobID, job.RequestLabels)
+		cancel()
+		if err != nil {
+			<-l.sem
+			return err
+		}
+		req := assignedRequest{
+			rawJobID: job.JobID,
+			ProvisionRequest: ProvisionRequest{
+				JobID:            canonicalJobID(job.JobID),
+				RequestID:        job.RunnerRequestID,
+				Labels:           job.RequestLabels,
+				EncodedJITConfig: jit,
+				Image:            l.cfg.Image,
+				Devices:          l.cfg.Devices,
+				Runtime:          l.cfg.Runtime,
+				BuildTool:        l.cfg.BuildTool,
+			},
+		}
+		pending = pending[1:]
 		l.wg.Add(1)
 		l.inFlight.Add(1)
 		l.track(req.JobID)
 		go func(req assignedRequest) {
 			defer l.wg.Done()
+			defer func() { <-l.sem }()
 			defer l.releaseAssignment(req.rawJobID)
 			defer l.inFlight.Add(-1)
 			defer l.untrack(req.JobID)
-			defer func() { <-l.sem }()
 			// Time the job so the structured per-job record carries its duration
 			// (#131). The container exit status comes from the Provision result:
 			// 0 on success, the propagated container code on a non-zero exit.
@@ -497,6 +494,7 @@ func (l *Listener) provision(ctx context.Context, reqs []assignedRequest) {
 			}
 		}(req)
 	}
+	return nil
 }
 
 // reportJobErr surfaces a per-job failure, via the injected OnJobErr hook or a

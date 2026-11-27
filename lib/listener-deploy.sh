@@ -326,18 +326,12 @@ listener_env_value() {
 listener_missing_env_defaults() {
   local file=$1 config_url=$2 types_config=$3 type_name=$4
   local prefix=${LISTENER_PREFIX:-/opt/github-runner-listener}
-  local target owner assignment
-  target=$(listener_env_value "${file}" GITHUB_CONFIG_URL)
-  target=${target:-${config_url}}
-  target=${target%%[?#]*}
-  target=${target#*://}
-  owner=
-  if [[ ${target} == */* ]]; then
-    target=${target#*/}
-    if [[ ${target,,} == enterprises/* ]]; then
-      target=${target#*/}
+  local owner="" assignment
+  if [[ -z $(listener_env_value "${file}" SCALE_SET_OWNER) ]]; then
+    if ! owner=$(hostname) || [[ -z ${owner} ]]; then
+      echo "FAIL: cannot derive SCALE_SET_OWNER from hostname" >&2
+      return 1
     fi
-    owner=${target%%/*}
   fi
   for assignment in \
     "GITHUB_CONFIG_URL=${config_url}" \
@@ -348,10 +342,6 @@ listener_missing_env_defaults() {
     "REAP_SCRIPT=${prefix}/listener/reap.sh" \
     "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh"; do
     if [[ -z $(listener_env_value "${file}" "${assignment%%=*}") ]]; then
-      if [[ ${assignment} == SCALE_SET_OWNER= ]]; then
-        echo "FAIL: cannot derive SCALE_SET_OWNER from GITHUB_CONFIG_URL without an owner path segment" >&2
-        return 1
-      fi
       # An empty default cannot fill a setting on reruns.
       [[ -n ${assignment#*=} || ${file} == /dev/null ]] || continue
       printf '%s\n' "${assignment}"

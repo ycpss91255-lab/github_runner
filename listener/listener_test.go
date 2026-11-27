@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -1286,14 +1285,7 @@ func TestListenBoundsEnvelopeRequests(t *testing.T) {
 				minter.onMint = func(ctx context.Context, _ string) error { return block(ctx) }
 			}
 
-			// Keep the red tests buildable until Config.RequestTimeout is added.
-			cfg := Config{}
-			if field := reflect.ValueOf(&cfg).Elem().FieldByName("RequestTimeout"); field.IsValid() {
-				if field.Type() != reflect.TypeOf(requestTimeout) {
-					t.Fatalf("Config.RequestTimeout has type %v, want time.Duration", field.Type())
-				}
-				field.SetInt(int64(requestTimeout))
-			}
+			cfg := Config{RequestTimeout: requestTimeout}
 
 			l := New(sess, minter, &recordingProvisioner{}, cfg)
 			done := make(chan error, 1)
