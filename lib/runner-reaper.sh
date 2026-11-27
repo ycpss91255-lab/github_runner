@@ -71,8 +71,9 @@ runner_reap_orphans() {
 
 # runner_prune_temp_dirs <work_root> [tracked_job_id ...]
 # Remove leaked per-job temp dirs (jit-<job_id>.XXXXXX, created by
-# provision-job.sh) under <work_root> that are NOT tracked, so a job killed
-# before its EXIT trap fired leaves no residue. A dir is spared iff it belongs
+# provision-job.sh) and their jit-<job_id>.XXXXXX.jitconfig.env credential
+# files under <work_root> that are NOT tracked, so a job killed before its EXIT
+# trap fired leaves no residue. A dir is spared iff it belongs
 # to a tracked job (its name starts with "jit-<id>."). STRICTLY scoped to
 # <work_root>: the root must be absolute and not a dangerous path, and pruning
 # only ever globs "<root>/jit-*" -- a tracked id can never widen the target or
@@ -108,6 +109,23 @@ runner_prune_temp_dirs() {
     esac
     echo "prune: removing stale temp dir ${base}" >&2
     runner_workdir_purge "${dir}" "${RUNNER_PURGE_IMAGE:-}"
+  done
+
+  # Leaked per-job JIT credential env files (jit-<job_id>.XXXXXX.jitconfig.env,
+  # the mode-0600 sibling runner_container_run writes beside the runner dir).
+  # They are removed by a RETURN trap in the container seam and by
+  # provision-job.sh's EXIT trap, but a job killed outright (SIGKILL, host
+  # crash) strands them. Same tracked-job skip as the dirs above, so a running
+  # job's credential is never removed. rm -f on a symlink removes the link only.
+  local file
+  for file in "${work_root}"/jit-*.jitconfig.env; do
+    [[ -f "${file}" || -L "${file}" ]] || continue
+    base=$(basename "${file}")
+    if _runner_prune_is_tracked "${base}" "${tracked[@]}"; then
+      continue
+    fi
+    echo "prune: removing stale JIT credential env file ${base}" >&2
+    rm -f -- "${file}" || echo "prune: failed to remove ${base}" >&2
   done
   return 0
 }
