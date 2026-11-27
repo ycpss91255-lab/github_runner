@@ -174,6 +174,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Both runner images carry the baseline host tools jobs call.**
+  Self-hosted jobs used to run on a full Ubuntu host, so org workflows call
+  host tools outside any container. On the ephemeral GPU runner,
+  omniverse_web_viewer's Tier B job passed its visual test and then failed
+  with "python3 is required to verify the attestation", because
+  `ghcr.io/ycpss91255-lab/gpu-runner` had no python3. Both
+  `images/runner-gpu.Dockerfile` and `images/runner-cpu.Dockerfile` now
+  install `ca-certificates curl git iproute2 jq python3 unzip xz-utils`
+  (`--no-install-recommends`) in one block shared byte-for-byte, so both
+  images provide `bash curl docker git gzip jq python3 sha256sum ss tar unzip
+  xz`. The PR build and the publish job check every tool with `command -v`
+  in both images before anything is pushed.
 - **The GPU runner image ships the Docker CLI with Compose and Buildx.**
   GPU jobs that drive the host Docker daemon failed within seconds with
   "docker: command not found", because `ghcr.io/ycpss91255-lab/gpu-runner`

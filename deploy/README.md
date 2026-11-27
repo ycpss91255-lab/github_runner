@@ -401,6 +401,26 @@ new `ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line from the
 workflow's job summary into the gpu type's `image:`, and uncomment
 `docker_socket` only for trusted jobs.
 
+**Baseline host tools in both images.** Workflow steps that are not in a
+`container:` run on the runner image itself, and org workflows were written
+for a full Ubuntu host. Both images therefore carry the same baseline, and
+the runner-images workflow checks every tool with `command -v` in each built
+image before it publishes:
+`bash`, `curl`, `docker`, `git`, `gzip`, `jq`, `python3`, `sha256sum`, `ss`,
+`tar`, `unzip`, `xz`. The packages come from one apt block shared
+byte-for-byte by `images/runner-cpu.Dockerfile` and
+`images/runner-gpu.Dockerfile`; to add a tool, add its package there, the
+command to `RUNNER_TOOLS` in the workflow and the list in
+`test/bats/unit/runner_image_tools.bats`, and name it here. A job that needs
+anything else (a compiler, a test framework, a language runtime) should run
+it in a container. To check a local build:
+
+```sh
+docker run --rm --entrypoint bash gpu-runner:2.338.2 -c \
+  'for t; do command -v "$t" || echo "missing: $t"; done' \
+  bash bash curl docker git gzip jq python3 sha256sum ss tar unzip xz
+```
+
 > **A GPU job actually executing is HITL.** The images *build* and are wired
 > into the GPU runner-type config AFK; running a real GPU job needs a host with
 > the NVIDIA driver + container runtime — an operator step on the target host.
