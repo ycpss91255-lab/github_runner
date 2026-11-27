@@ -113,3 +113,17 @@ func TestRunnerTypeInstanceCopiesDockerSocket(t *testing.T) {
 		t.Errorf("Config.DockerSocket = %q, want %q", got, socket)
 	}
 }
+
+// The instance carries the runner group the listener resolves its scale set
+// in: the configured one, else Default -- never empty, which would mean "search
+// every group" and is ambiguous once several groups hold a set of this name.
+func TestRunnerTypeInstanceCarriesRunnerGroup(t *testing.T) {
+	rt := RunnerType{Name: "cpu", ScaleSet: "cpu", Labels: []string{"cpu"}, Image: "i@sha256:1", RunnerGroup: "ci-kai"}
+	if got := rt.Instance(InstanceDeps{}).RunnerGroup; got != "ci-kai" {
+		t.Errorf("RunnerGroup = %q, want ci-kai", got)
+	}
+	rt.RunnerGroup = ""
+	if got := rt.Instance(InstanceDeps{}).RunnerGroup; got != DefaultRunnerGroup {
+		t.Errorf("RunnerGroup = %q, want %q", got, DefaultRunnerGroup)
+	}
+}

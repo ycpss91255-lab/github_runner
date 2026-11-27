@@ -333,3 +333,62 @@ func TestLoadConfigRejectsInvalidDockerSocket(t *testing.T) {
 		})
 	}
 }
+
+// runner_group is optional: it loads verbatim when set, and stays empty (the
+// Default group) when omitted so existing configs keep their meaning.
+func TestLoadConfigRunnerGroup(t *testing.T) {
+	types, err := LoadConfig(writeConfig(t, dockerSocketConfig+"    runner_group: ci-kai\n"))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := types[0].RunnerGroup; got != "ci-kai" {
+		t.Errorf("RunnerGroup = %q, want ci-kai", got)
+	}
+
+	types, err = LoadConfig(writeConfig(t, dockerSocketConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	if got := types[0].RunnerGroup; got != "" {
+		t.Errorf("RunnerGroup = %q, want empty (Default)", got)
+	}
+	if got := types[0].EffectiveRunnerGroup(); got != DefaultRunnerGroup {
+		t.Errorf("EffectiveRunnerGroup = %q, want %q", got, DefaultRunnerGroup)
+	}
+}
+
+// Two types may share a scale set NAME when they live in different runner
+// groups -- the HA layout -- but not when they would collide in one group.
+func TestLoadConfigScaleSetUniquePerGroup(t *testing.T) {
+	ok := "runner_types:\n" +
+		"  - name: cpu-a\n    scale_set: cpu\n    runner_group: ci-kai\n    labels: [a]\n    image: i@sha256:1\n" +
+		"  - name: cpu-b\n    scale_set: cpu\n    runner_group: ci-samuel\n    labels: [a]\n    image: i@sha256:1\n"
+	if _, err := LoadConfig(writeConfig(t, ok)); err != nil {
+		t.Errorf("same scale set name in different groups must load: %v", err)
+	}
+	clash := "runner_types:\n" +
+		"  - name: cpu-a\n    scale_set: cpu\n    labels: [a]\n    image: i@sha256:1\n" +
+		"  - name: cpu-b\n    scale_set: cpu\n    runner_group: Default\n    labels: [a]\n    image: i@sha256:1\n"
+	if _, err := LoadConfig(writeConfig(t, clash)); err == nil || !strings.Contains(err.Error(), "scale set") {
+		t.Errorf("same scale set name in the same (Default) group must fail, got %v", err)
+	}
+}
+
+// A runner_group that cannot be a GitHub group name fails the load naming the
+// field, rather than reaching the API as a lookup that silently finds nothing.
+func TestLoadConfigRejectsInvalidRunnerGroup(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"leading space", `" ci-kai"`},
+		{"trailing space", `"ci-kai "`},
+		{"only spaces", `"   "`},
+		{"control character", `"ci\x7fkai"`},
+		{"newline", `"ci\nkai"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadConfig(writeConfig(t, dockerSocketConfig+"    runner_group: "+tc.value+"\n"))
+			if err == nil || !strings.Contains(err.Error(), "runner_group") {
+				t.Fatalf("runner_group: %s returned %v, want a runner_group error", tc.value, err)
+			}
+		})
+	}
+}

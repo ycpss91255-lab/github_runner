@@ -112,8 +112,12 @@ func main() {
 	// like the routing target when it is not.
 	var (
 		scaleSetName string
-		image        string
-		reserve      int
+		// The runner group the scale set is resolved in -- never "all groups",
+		// which is ambiguous once several hosts' groups each hold a set of this
+		// name (the high-availability layout, deploy/README.md).
+		runnerGroup string
+		image       string
+		reserve     int
 		// Per-type provisioning fields carried across the widened shell-out
 		// (#117/#119): devices for precise --device passthrough, the container
 		// runtime shim, and the daemonless build tool. Empty in the discrete-env
@@ -129,6 +133,7 @@ func main() {
 			log.Fatalf("runner-type config: %v", err)
 		}
 		scaleSetName = inst.ScaleSet
+		runnerGroup = inst.RunnerGroup
 		image = inst.Config.Image
 		devices = inst.Config.Devices
 		runtime = inst.Config.Runtime
@@ -140,10 +145,11 @@ func main() {
 		// detector.
 		detector = inst.Config.DeviceDetector
 		hostProbe = inst.Config.HostProbe
-		log.Printf("runner type %q -> scale set %q (labels=%v)", inst.Name, inst.ScaleSet, inst.Labels)
+		log.Printf("runner type %q -> scale set %q in runner group %q (labels=%v)", inst.Name, inst.ScaleSet, inst.RunnerGroup, inst.Labels)
 	} else {
 		// The scale set's IDENTIFIER, not the runs-on target (see above).
 		scaleSetName = os.Getenv("SCALE_SET_NAME")
+		runnerGroup = envOr("RUNNER_GROUP", listener.DefaultRunnerGroup)
 		image = envOr("RUNNER_IMAGE", "ghcr.io/actions/actions-runner:latest")
 		// Reactive by default; AUTO_SIZE_DEVICES opts into device sizing instead.
 		if os.Getenv("AUTO_SIZE_DEVICES") != "" {
@@ -174,7 +180,7 @@ func main() {
 	// scale set" as (nil, nil), so dereferencing the result here used to panic
 	// with a nil pointer when the scale set had not been created yet -- a stack
 	// trace where the operator needed one sentence naming the create command.
-	scaleSet, err := listener.ResolveScaleSet(ctx, client, scaleSetName)
+	scaleSet, err := listener.ResolveScaleSet(ctx, client, scaleSetName, runnerGroup)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -204,7 +210,7 @@ func main() {
 		JobLogger:      listener.NewJournalJobLogger(),
 	})
 
-	log.Printf("listener up: scale set %q (id=%d), image=%s", scaleSetName, scaleSet.ID, image)
+	log.Printf("listener up: scale set %q (id=%d) in runner group %q, image=%s", scaleSetName, scaleSet.ID, runnerGroup, image)
 	if err := l.Listen(ctx); err != nil {
 		log.Fatalf("listener exited with error: %v", err)
 	}

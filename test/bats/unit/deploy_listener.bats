@@ -44,6 +44,9 @@ echo 'scale_set=gpu-runners'
 echo 'labels=self-hosted,linux,gpu'
 echo 'image=ghcr.io/acme/r@sha256:abc'
 echo 'runs_on=runs-on: [self-hosted, linux, gpu]'
+# The type's runner group, only when a test sets one -- an older admin tool
+# that predates the field prints no such line, and that must still work.
+[ -z "${STUB_RUNNER_GROUP:-}" ] || echo "runner_group=${STUB_RUNNER_GROUP}"
 STUB
   chmod +x "${SCALESET_ADMIN_BIN}"
 }
@@ -244,6 +247,9 @@ echo 'scale_set=gpu-runners'
 echo 'labels=self-hosted,linux,gpu'
 echo 'image=ghcr.io/acme/r@sha256:abc'
 echo 'runs_on=runs-on: [self-hosted, linux, gpu]'
+# The type's runner group, only when a test sets one -- an older admin tool
+# that predates the field prints no such line, and that must still work.
+[ -z "${STUB_RUNNER_GROUP:-}" ] || echo "runner_group=${STUB_RUNNER_GROUP}"
 STUB
   chmod +x "${SCALESET_ADMIN_BIN}"
 
@@ -303,4 +309,38 @@ STUB
   [[ "${output}" == *"--config-url"* ]]
   # It must say a repository is a valid target, not only an org.
   [[ "${output}" == *"owner>/<repo"* ]]
+}
+
+# --- runner group: defaults to the type's runner_group ----------------------
+# The HA layout puts the same scale set name in one runner group per host, so
+# the group is part of WHICH scale set a host serves. The deploy learns it from
+# the config (through `scaleset-admin show`) instead of making the operator
+# repeat it as a flag on every host.
+
+@test "deploy-listener.sh --dry-run plans the type's runner_group when --group is omitted" {
+  STUB_RUNNER_GROUP=ci-kai run "${SCRIPT}" --dry-run --config "${CONFIG}" --type gpu \
+    --org-url https://github.com/acme --prefix "${WORK}/opt" --etc "${WORK}/etc"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Runner group:   ci-kai"* ]]
+}
+
+@test "deploy-listener.sh --dry-run plans Default when show reports no runner_group" {
+  run "${SCRIPT}" --dry-run --config "${CONFIG}" --type gpu \
+    --org-url https://github.com/acme --prefix "${WORK}/opt" --etc "${WORK}/etc"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Runner group:   Default"* ]]
+}
+
+@test "deploy-listener.sh --group overrides the type's runner_group in the plan" {
+  STUB_RUNNER_GROUP=ci-kai run "${SCRIPT}" --dry-run --config "${CONFIG}" --type gpu \
+    --group ci-samuel \
+    --org-url https://github.com/acme --prefix "${WORK}/opt" --etc "${WORK}/etc"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"Runner group:   ci-samuel"* ]]
+}
+
+@test "deploy-listener.sh --help says --group defaults to the type's runner_group" {
+  run "${SCRIPT}" --help
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"runner_group"* ]]
 }

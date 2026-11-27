@@ -717,6 +717,10 @@ listener_config_labels()  { listener_show_field "$1" "$2" labels; }
 listener_config_scaleset(){ listener_show_field "$1" "$2" scale_set; }
 listener_config_image()   { listener_show_field "$1" "$2" image; }
 listener_runs_on_line()   { listener_show_field "$1" "$2" runs_on; }
+# The type's EFFECTIVE runner group. An admin tool built before the field
+# existed prints no runner_group line; that reads as empty, which the caller
+# treats as Default -- the group such a tool always created in.
+listener_config_runner_group() { listener_show_field "$1" "$2" runner_group; }
 
 # Write a complete one-type runner-type config.
 #
@@ -724,8 +728,14 @@ listener_runs_on_line()   { listener_show_field "$1" "$2" runs_on; }
 # It is how the interaction records what it settled on, so the config stays the
 # single source of truth for routing instead of the answers living only in the
 # operator's terminal scrollback.
+#
+# The optional sixth argument is the runner group. It is written down for the
+# same reason the labels are: the listener resolves its scale set in the
+# CONFIG's group, so a group that only reached the create would leave the
+# listener looking in Default -- which, in the high-availability layout (one
+# same-named scale set per host group), is another host's set or none at all.
 listener_write_type_config() {
-  local file=$1 name=$2 scale_set=$3 labels_csv=$4 image=$5
+  local file=$1 name=$2 scale_set=$3 labels_csv=$4 image=$5 runner_group=${6-}
   local labels_yaml
   # [a, b, c] -- the flow-sequence form the sample uses.
   labels_yaml="[${labels_csv//,/, }]"
@@ -739,6 +749,9 @@ listener_write_type_config() {
     printf 'runner_types:\n'
     printf '  - name: %s\n' "${name}"
     printf '    scale_set: %s\n' "${scale_set}"
+    if [[ -n ${runner_group} ]]; then
+      printf '    runner_group: %s\n' "${runner_group}"
+    fi
     printf '    labels: %s\n' "${labels_yaml}"
     printf '    image: %s\n' "${image}"
   } > "${file}"

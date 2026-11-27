@@ -20,7 +20,13 @@
 // paste into a workflow.
 //
 //	scaleset-admin create [--config <path>] [--type <name>] [--group <name>] [--dry-run]
-//	scaleset-admin delete [--config <path>] [--type <name>] (--yes | --dry-run)
+//	scaleset-admin delete [--config <path>] [--type <name>] [--group <name>] (--yes | --dry-run)
+//	scaleset-admin show   [--config <path>] [--type <name>]
+//
+// RUNNER GROUPS. A scale set name is unique only within a runner group, and the
+// high-availability layout gives every host the same name in its own group.
+// So every verb acts in ONE group -- the type's runner_group, else --group,
+// else Default -- and never searches across groups.
 //
 // Credentials come from the environment (GITHUB_CONFIG_URL, GITHUB_TOKEN),
 // never from a flag: a token in a flag is a token in the host process table.
@@ -41,7 +47,7 @@ import (
 // usage is printed for -h and for any usage error, so the two agree.
 const usage = `usage:
   scaleset-admin create [--config <path>] [--type <name>] [--group <name>] [--dry-run]
-  scaleset-admin delete [--config <path>] [--type <name>] (--yes | --dry-run)
+  scaleset-admin delete [--config <path>] [--type <name>] [--group <name>] (--yes | --dry-run)
   scaleset-admin show   [--config <path>] [--type <name>]
 
 Create or delete the GitHub runner scale set a runner type binds to. The scale
@@ -49,14 +55,19 @@ set NAME and its routing LABELS both come from the runner-type config; there is
 deliberately no way to pass either as a flag.
 
 The show verb reports what the config says about a runner type, as key=value
-lines (name, scale_set, labels, image, runs_on), and makes NO network call. It
+lines (name, scale_set, labels, image, runs_on, runner_group), and makes NO
+network call. It
 is how the deploy tooling learns a type's scale set and routing labels without
 re-implementing a YAML parser in shell -- the Go loader stays the only parser.
 
   --config <path>   runner-type config (default: $RUNNER_TYPES_CONFIG)
   --type <name>     which runner type to act on (default: $RUNNER_TYPE; may be
                     omitted when the config holds exactly one type)
-  --group <name>    runner group to create in (default: Default)
+  --group <name>    runner group to act in (default: the type's runner_group,
+                    else Default). A scale set name is unique only within a
+                    group, so create and delete never search across groups.
+                    A --group that differs from a configured runner_group is
+                    an error: the listener looks in the config's group.
   --dry-run         print the plan; change nothing
   --yes             required by delete: it is destructive and not reversible
                     from here (the scale set has to be created again)
@@ -103,7 +114,7 @@ func parseArgs(args []string) (options, error) {
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	fs.StringVar(&opts.config, "config", os.Getenv("RUNNER_TYPES_CONFIG"), "runner-type config path")
 	fs.StringVar(&opts.typ, "type", os.Getenv("RUNNER_TYPE"), "runner type to act on")
-	fs.StringVar(&opts.group, "group", "", "runner group to create in")
+	fs.StringVar(&opts.group, "group", "", "runner group to act in")
 	fs.BoolVar(&opts.dryRun, "dry-run", false, "print the plan; change nothing")
 	fs.BoolVar(&opts.yes, "yes", false, "confirm a destructive action")
 	if err := fs.Parse(args[1:]); err != nil {
@@ -173,15 +184,15 @@ func printRunsOn(labels []string) {
 
 // runDelete removes the type's scale set, or reports that there was nothing to
 // remove.
-func runDelete(ctx context.Context, admin listener.ScaleSetAdmin, rt listener.RunnerType) error {
-	res, err := listener.DeleteScaleSet(ctx, admin, rt)
+func runDelete(ctx context.Context, admin listener.ScaleSetAdmin, rt listener.RunnerType, group string) error {
+	res, err := listener.DeleteScaleSet(ctx, admin, rt, group)
 	if err != nil {
 		return err
 	}
 	if res.Deleted {
 		fmt.Printf("deleted scale set %q (id=%d)\n", res.Name, res.ID)
 	} else {
-		fmt.Printf("no scale set named %q exists; nothing to delete\n", res.Name)
+		fmt.Printf("no scale set named %q exists in the runner group; nothing to delete\n", res.Name)
 	}
 	return nil
 }
@@ -213,12 +224,15 @@ func main() {
 	// The outward action is announced before it is taken, in both modes: a
 	// dry run stops here, a real run has already said exactly what it is about
 	// to create on GitHub.
+	// One group rule for the plan and the action, so the plan cannot name a
+	// group the action does not use.
+	group, err := listener.ResolveGroupName(rt, opts.group)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "scaleset-admin: %v\n", err)
+		os.Exit(1)
+	}
 	switch opts.verb {
 	case "create":
-		group := opts.group
-		if group == "" {
-			group = listener.DefaultRunnerGroup
-		}
 		fmt.Printf("Plan (GitHub side):\n")
 		fmt.Printf("  Runner type:    %s\n", rt.Name)
 		fmt.Printf("  Scale set:      %s   (identifier)\n", rt.ScaleSet)
@@ -229,6 +243,7 @@ func main() {
 		fmt.Printf("Plan (GitHub side):\n")
 		fmt.Printf("  Runner type:    %s\n", rt.Name)
 		fmt.Printf("  Scale set:      %s\n", rt.ScaleSet)
+		fmt.Printf("  Runner group:   %s   (same-named sets in other groups are untouched)\n", group)
 		fmt.Println("  Action:         DELETE it from GitHub")
 		fmt.Println("  Consequence:    workflows targeting its labels stop being served")
 	}
@@ -253,7 +268,7 @@ func main() {
 	case "create":
 		err = runCreate(ctx, admin, rt, opts.group)
 	case "delete":
-		err = runDelete(ctx, admin, rt)
+		err = runDelete(ctx, admin, rt, opts.group)
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scaleset-admin: %v\n", err)

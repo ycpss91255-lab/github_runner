@@ -663,6 +663,36 @@ teardown() { rm -rf "${WORK}"; }
   [ "${output}" = "self-hosted,gpu" ]
 }
 
+@test "listener_config_runner_group reads the runner group through the same Go command" {
+  run bash -c "
+    source '${LIB}'
+    _scaleset_admin() { printf '%s\\n' 'labels=gpu' 'runner_group=ci-kai'; }
+    listener_config_runner_group /c.yaml gpu
+  "
+  [ "${status}" -eq 0 ]
+  [ "${output}" = "ci-kai" ]
+}
+
+@test "listener_write_type_config records a runner group when given one" {
+  # A generated config that dropped the group would point the listener at the
+  # Default group's scale set -- which, in the HA layout, is not this host's.
+  run bash -c "
+    source '${LIB}'
+    listener_write_type_config '${WORK}/rt.yaml' cpu cpu 'self-hosted,cpu' 'i@sha256:a' ci-kai
+  "
+  [ "${status}" -eq 0 ]
+  grep -q '^    runner_group: ci-kai$' "${WORK}/rt.yaml"
+}
+
+@test "listener_write_type_config writes no runner_group line without one" {
+  run bash -c "
+    source '${LIB}'
+    listener_write_type_config '${WORK}/rt.yaml' cpu cpu 'self-hosted,cpu' 'i@sha256:a'
+  "
+  [ "${status}" -eq 0 ]
+  ! grep -q 'runner_group' "${WORK}/rt.yaml"
+}
+
 # --- the admin tool: finding it, and naming it when it is not there ---------
 # The deploy command reads the runner-type config THROUGH scaleset-admin, so
 # the tool is needed before any other step -- earlier than the local half that

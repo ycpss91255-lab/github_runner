@@ -21,9 +21,10 @@ const DefaultRunnerGroup = "Default"
 // use, and it is what lets the create/delete logic be unit-tested with no
 // credentials and no live GitHub.
 type ScaleSetAdmin interface {
-	// GetRunnerScaleSet finds a scale set by name within a runner group (0
-	// searches across groups). IMPORTANT: the client reports "no such scale
-	// set" as (nil, nil), NOT as an error -- see ResolveScaleSet.
+	// GetRunnerScaleSet finds a scale set by name within a runner group.
+	// IMPORTANT: the client reports "no such scale set" as (nil, nil), NOT as
+	// an error -- see ResolveScaleSet. Group id 0 searches across groups; this
+	// package never passes it (see lookupInGroup).
 	GetRunnerScaleSet(ctx context.Context, runnerGroupID int, name string) (*scaleset.RunnerScaleSet, error)
 	// GetRunnerGroupByName resolves a runner group name to its id.
 	GetRunnerGroupByName(ctx context.Context, name string) (*scaleset.RunnerGroup, error)
@@ -135,27 +136,78 @@ func sameLabels(a, b []string) bool {
 	return true
 }
 
+// ResolveGroupName reconciles a --group flag with the type's runner_group and
+// returns the runner group to act in. The flag fills in when the config names
+// no group; when both are given they must agree. Neither given means
+// DefaultRunnerGroup.
+//
+// A disagreement is an error rather than "the flag wins": the listener resolves
+// its scale set in the CONFIG's group, so a set created in the flag's group
+// would be one the listener never finds.
+func ResolveGroupName(rt RunnerType, flag string) (string, error) {
+	switch {
+	case flag == "":
+		return rt.EffectiveRunnerGroup(), nil
+	case rt.RunnerGroup == "" || rt.RunnerGroup == flag:
+		return flag, nil
+	default:
+		return "", fmt.Errorf("--group %q contradicts runner type %q's runner_group %q; drop the flag or change the config",
+			flag, rt.Name, rt.RunnerGroup)
+	}
+}
+
+// lookupInGroup resolves a runner group by name and looks a scale set up
+// WITHIN it. It never searches across groups (id 0): the high-availability
+// layout gives every host the same scale set name in its own group, so a
+// cross-group search is ambiguous -- the client answers it with "multiple
+// runner scale sets found", or, with one match, silently returns another
+// host's set. An empty groupName means DefaultRunnerGroup.
+//
+// The returned set is nil, with a nil error, when the group exists but holds
+// no set of that name (the client's contract, kept).
+func lookupInGroup(ctx context.Context, admin ScaleSetAdmin, name, groupName string) (*scaleset.RunnerGroup, *scaleset.RunnerScaleSet, error) {
+	if groupName == "" {
+		groupName = DefaultRunnerGroup
+	}
+	group, err := admin.GetRunnerGroupByName(ctx, groupName)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve runner group %q: %w", groupName, err)
+	}
+	set, err := admin.GetRunnerScaleSet(ctx, group.ID, name)
+	if err != nil {
+		return nil, nil, fmt.Errorf("look up scale set %q in runner group %q: %w", name, groupName, err)
+	}
+	return group, set, nil
+}
+
 // EnsureScaleSet creates the GitHub scale set a runner type binds to, and is
-// idempotent: if the scale set already exists it is left exactly as it is and
-// reported as such, so running the deploy on a second machine performs no
-// GitHub-side work at all.
+// idempotent: if the scale set already exists in the type's runner group it is
+// left exactly as it is and reported as such, so re-running the deploy on a
+// machine performs no GitHub-side work at all.
 //
 // The name comes from the type's scale_set and the routing labels from
 // RoutingLabels, so deploy/runner-types.yaml is the single source of truth for
 // routing and the name/labels mismatch that strands jobs in queued cannot be
 // introduced by a flag.
 //
-// groupName is the runner group to create in; empty means DefaultRunnerGroup.
-// An unresolvable group is an error with nothing created -- creating in group 0
-// instead would put the scale set somewhere the operator did not ask for.
-func EnsureScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, groupName string) (ScaleSetResult, error) {
+// groupFlag is the --group flag; the group acted in is ResolveGroupName's
+// answer (the type's runner_group, else the flag, else DefaultRunnerGroup). An
+// unresolvable group is an error with nothing created -- creating in group 0
+// instead would put the scale set somewhere the operator did not ask for. A
+// same-named set in ANOTHER group does not count as existing: that is another
+// host's set in the high-availability layout.
+func EnsureScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, groupFlag string) (ScaleSetResult, error) {
+	groupName, err := ResolveGroupName(rt, groupFlag)
+	if err != nil {
+		return ScaleSetResult{}, err
+	}
 	labels := RoutingLabels(rt)
 
 	// Look first. A lookup FAILURE is a failure: proceeding on "I could not
 	// tell whether it exists" is how a duplicate gets created.
-	existing, err := admin.GetRunnerScaleSet(ctx, 0, rt.ScaleSet)
+	group, existing, err := lookupInGroup(ctx, admin, rt.ScaleSet, groupName)
 	if err != nil {
-		return ScaleSetResult{}, fmt.Errorf("look up scale set %q: %w", rt.ScaleSet, err)
+		return ScaleSetResult{}, err
 	}
 	if existing != nil {
 		live := labelNames(existing.Labels)
@@ -172,14 +224,6 @@ func EnsureScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, gro
 		return res, nil
 	}
 
-	if groupName == "" {
-		groupName = DefaultRunnerGroup
-	}
-	group, err := admin.GetRunnerGroupByName(ctx, groupName)
-	if err != nil {
-		return ScaleSetResult{}, fmt.Errorf("resolve runner group %q: %w", groupName, err)
-	}
-
 	// Labels are written EXPLICITLY, never left empty for the client to fill
 	// from the name (see RoutingLabels).
 	want := make([]scaleset.Label, 0, len(labels))
@@ -193,7 +237,7 @@ func EnsureScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, gro
 		Labels:          want,
 	})
 	if err != nil {
-		return ScaleSetResult{}, fmt.Errorf("create scale set %q: %w", rt.ScaleSet, err)
+		return ScaleSetResult{}, fmt.Errorf("create scale set %q in runner group %q: %w", rt.ScaleSet, groupName, err)
 	}
 	return ScaleSetResult{
 		Name:        created.Name,
@@ -204,13 +248,20 @@ func EnsureScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, gro
 	}, nil
 }
 
-// DeleteScaleSet removes the GitHub scale set a runner type binds to. Deleting
-// is always an explicit act -- nothing else in this repo calls it -- and an
-// absent scale set is a successful no-op so a teardown can be re-run.
-func DeleteScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType) (DeleteResult, error) {
-	existing, err := admin.GetRunnerScaleSet(ctx, 0, rt.ScaleSet)
+// DeleteScaleSet removes the GitHub scale set a runner type binds to, in the
+// type's runner group (reconciled with groupFlag as for create). Same-named
+// sets in other groups -- other hosts' sets in the high-availability layout --
+// are never touched. Deleting is always an explicit act -- nothing else in this
+// repo calls it -- and an absent scale set is a successful no-op so a teardown
+// can be re-run.
+func DeleteScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType, groupFlag string) (DeleteResult, error) {
+	groupName, err := ResolveGroupName(rt, groupFlag)
 	if err != nil {
-		return DeleteResult{}, fmt.Errorf("look up scale set %q: %w", rt.ScaleSet, err)
+		return DeleteResult{}, err
+	}
+	_, existing, err := lookupInGroup(ctx, admin, rt.ScaleSet, groupName)
+	if err != nil {
+		return DeleteResult{}, err
 	}
 	if existing == nil {
 		return DeleteResult{Name: rt.ScaleSet}, nil
@@ -221,19 +272,27 @@ func DeleteScaleSet(ctx context.Context, admin ScaleSetAdmin, rt RunnerType) (De
 	return DeleteResult{Name: existing.Name, ID: existing.ID, Deleted: true}, nil
 }
 
-// ResolveScaleSet fetches a scale set by name, turning the client's "(nil, nil)
-// means absent" contract into an error that says what to do about it.
+// ResolveScaleSet fetches a scale set by name within a runner group (empty =
+// DefaultRunnerGroup), turning the client's "(nil, nil) means absent" contract
+// into an error that says what to do about it.
 //
 // The distinction matters: the production entrypoint used to dereference that
 // nil, so a listener pointed at a scale set nobody had created yet died with a
 // nil-pointer panic -- a stack trace where the operator needed one sentence.
-func ResolveScaleSet(ctx context.Context, admin ScaleSetAdmin, name string) (*scaleset.RunnerScaleSet, error) {
-	set, err := admin.GetRunnerScaleSet(ctx, 0, name)
+//
+// The group is resolved by name and the lookup is made in it, never across
+// groups: with the same scale set name in one group per host, "any group" is
+// ambiguous. An unknown group is an error naming it.
+func ResolveScaleSet(ctx context.Context, admin ScaleSetAdmin, name, groupName string) (*scaleset.RunnerScaleSet, error) {
+	if groupName == "" {
+		groupName = DefaultRunnerGroup
+	}
+	_, set, err := lookupInGroup(ctx, admin, name, groupName)
 	if err != nil {
 		return nil, fmt.Errorf("get scale set %q: %w", name, err)
 	}
 	if set == nil {
-		return nil, fmt.Errorf("no scale set named %q exists -- create it first with `scaleset-admin create`", name)
+		return nil, fmt.Errorf("no scale set named %q exists in runner group %q -- create it first with `scaleset-admin create`", name, groupName)
 	}
 	return set, nil
 }
@@ -266,7 +325,8 @@ func SelectType(path, typeName string) (RunnerType, error) {
 
 // DescribeType renders a runner type as machine-readable key=value lines: what
 // the type is called, the scale set it binds to, the EFFECTIVE routing labels,
-// its image, and the literal runs-on line a workflow needs.
+// its image, the literal runs-on line a workflow needs, and the EFFECTIVE
+// runner group the scale set lives in.
 //
 // It exists so the deploy tooling can learn a type's scale set and labels
 // without parsing the runner-type YAML itself. ADR-0003 makes the Go loader the
@@ -285,5 +345,8 @@ func DescribeType(rt RunnerType) []string {
 		"labels=" + strings.Join(labels, ","),
 		"image=" + rt.Image,
 		"runs_on=" + RunsOn(labels),
+		// The EFFECTIVE group (Default when unset), for the same reason the
+		// labels are effective: the caller asked which group, so answer it.
+		"runner_group=" + rt.EffectiveRunnerGroup(),
 	}
 }

@@ -16,6 +16,9 @@ type Instance struct {
 	Name string
 	// ScaleSet is the GitHub scale set this listener binds to.
 	ScaleSet string
+	// RunnerGroup is the runner group the scale set is resolved in (the
+	// type's runner_group, else Default; never empty).
+	RunnerGroup string
 	// Labels are the type's runs-on labels (informational; the scale set pins
 	// labels for its runners).
 	Labels []string
@@ -55,10 +58,11 @@ func (rt RunnerType) Instance(deps InstanceDeps) Instance {
 		cfg.Reserve = rt.Concurrency.Reserve
 	}
 	return Instance{
-		Name:     rt.Name,
-		ScaleSet: rt.ScaleSet,
-		Labels:   rt.Labels,
-		Config:   cfg,
+		Name:        rt.Name,
+		ScaleSet:    rt.ScaleSet,
+		RunnerGroup: rt.EffectiveRunnerGroup(),
+		Labels:      rt.Labels,
+		Config:      cfg,
 	}
 }
 
