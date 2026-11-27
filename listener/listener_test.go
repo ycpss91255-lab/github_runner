@@ -119,7 +119,7 @@ type recordingMinter struct {
 	gotNames []string // job names passed to Mint
 }
 
-func (m *recordingMinter) Mint(ctx context.Context, name string, _ []string) (string, error) {
+func (m *recordingMinter) Mint(ctx context.Context, name string, _ []string, _ string) (string, error) {
 	m.gotNames = append(m.gotNames, name)
 	if m.onMint != nil {
 		if err := m.onMint(ctx, name); err != nil {

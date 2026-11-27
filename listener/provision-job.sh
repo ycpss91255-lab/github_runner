@@ -23,12 +23,12 @@
 #                             -> one --runtime <value>; empty = engine default
 #   RUNNER_BUILD_TOOL         daemonless image builder (kaniko/buildkit), #119
 #   RUNNER_DOCKER_SOCKET      opt-in host Docker socket path (empty = off), #116
+#   RUNNER_JOB_WORKDIR       absolute same-path work folder for socket jobs
 #
 # Each invocation runs EXACTLY ONE ephemeral job in a throwaway container that
 # is torn down on exit (--rm), then returns the in-container job's exit status
-# so the listener can surface a failed job and tear its session down. No state
-# survives: the runner dir is a per-job mktemp dir removed on exit, and the
-# image's bundled run.sh consumes the single-use JIT config minted server-side.
+# so the listener can surface a failed job. The per-job dir is removed on exit,
+# and the image's bundled run.sh consumes the JIT config minted server-side.
 set -euo pipefail
 
 # Locate lib/ relative to this script (the listener dir lives beside the repo
@@ -50,7 +50,7 @@ image=$3
 encoded=$(cat -- "${jit_file}")
 [[ -n "${encoded}" ]] || { echo "FAIL: empty JIT config for job ${job_id}" >&2; exit 2; }
 
-# A throwaway, per-job runner dir mounted into the container. It holds no
+# A throwaway per-job runner dir, mounted only for socket jobs. It holds no
 # persistent state -- the JIT config makes the runner single-use -- and is
 # removed on exit so nothing from this job can poison the next. The dir name
 # carries the job id for traceability.
@@ -63,29 +63,47 @@ encoded=$(cat -- "${jit_file}")
 # not source common.sh) still anchors under the same tree. RUNNER_WORK_ROOT
 # overrides it for tests / alternate layouts.
 #
-# runner_work_root (lib/runner-container.sh, sourced above) is the SINGLE source
-# of truth shared with reap.sh, so the reaper prunes EXACTLY this root and the two
-# halves can never diverge (#148). RUNNER_HOME is still materialised here for the
-# history store (lib/runner-history.sh) which also anchors under it.
+# runner_work_root is shared with reap.sh (#148). RUNNER_HOME is also needed
+# by the history store (lib/runner-history.sh), which anchors under it.
 : "${RUNNER_HOME:=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)/runners}"
 # Job-history store (ADR-0002): the capture-before-teardown hook lives here, so
 # forensics are captured out-of-band BEFORE the container/temp dir is removed.
 # shellcheck source=SCRIPTDIR/../lib/runner-history.sh
 source "${SCRIPT_DIR}/../lib/runner-history.sh"
 work_root="$(runner_work_root)"
-# Create the work root so mktemp -d can land the per-job dir under it on a fresh
-# host (RUNNER_HOME/work may not exist yet).
-mkdir -p "${work_root}"
-runner_dir="$(mktemp -d "${work_root%/}/jit-${job_id}.XXXXXX")"
+if [[ -n "${RUNNER_DOCKER_SOCKET}" ]]; then
+  runner_dir=${RUNNER_JOB_WORKDIR:-}
+  if [[ "${runner_dir}" != /* || "${runner_dir}" == */ ||
+        "${runner_dir}/" == *//* || "${runner_dir}/" == */../* ||
+        "${runner_dir}/" == */./* || "${runner_dir}" == *[:[:space:][:cntrl:]]* ||
+        "$(dirname -- "${runner_dir}")" != "${work_root}" ||
+        "${runner_dir##*/}" != "jit-${job_id}."* ]]; then
+    printf 'FAIL: invalid RUNNER_JOB_WORKDIR for job %q\n' "${job_id}" >&2
+    exit 2
+  fi
+  # A socket workdir is world-writable. Keep its parent private on fresh hosts.
+  ( umask 077; mkdir -p -- "${work_root}"; )
+  if ! mkdir -- "${runner_dir}"; then
+    printf 'FAIL: could not create RUNNER_JOB_WORKDIR %q\n' "${runner_dir}" >&2
+    exit 2
+  fi
+else
+  mkdir -p -- "${work_root}"
+  runner_dir="$(mktemp -d "${work_root%/}/jit-${job_id}.XXXXXX")"
+fi
 
 # No state from this job survives to poison the next: the per-job runner dir is
 # removed on exit. There is NO separate captured job log -- the container's
 # combined stdout/stderr is FULLY attacker-controlled job-console output whose
 # authoritative copy already lives in GitHub's job log, so we never durably
-# capture that stream on the host (ADR-0002 / #154). This also dissolves the
-# symlink-swap surface (#145): provision-job never re-opens any path the job
-# could influence.
-trap 'rm -rf "${runner_dir}"' EXIT
+# capture that stream on the host (ADR-0002 / #154).
+# Quote the cleanup arguments for the trap's second parse (#142).
+printf -v purge_args '%q %q' "${runner_dir}" "${image}"
+# shellcheck disable=SC2064  # expand now using %q
+trap "runner_workdir_purge ${purge_args}" EXIT
+if [[ -n "${RUNNER_DOCKER_SOCKET}" ]]; then
+  chmod 0777 -- "${runner_dir}"
+fi
 
 # Hand the single-use JIT config + image + job id to the Phase 3 seam; it runs
 # `<cli> run --rm ...` so the container is single-use and torn down on exit,

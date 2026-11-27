@@ -107,7 +107,7 @@ runner_prune_temp_dirs() {
       *) echo "prune: refusing rm outside work root: ${dir}" >&2; continue ;;
     esac
     echo "prune: removing stale temp dir ${base}" >&2
-    rm -rf "${dir}"
+    runner_workdir_purge "${dir}" "${RUNNER_PURGE_IMAGE:-}"
   done
   return 0
 }

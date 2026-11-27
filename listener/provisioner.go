@@ -43,6 +43,7 @@ type ContainerProvisioner struct {
 //	RUNNER_RUNTIME            container runtime shim -> --runtime (empty = none)
 //	RUNNER_BUILD_TOOL         daemonless builder (kaniko/buildkit) or empty
 //	RUNNER_DOCKER_SOCKET      host Docker socket path or explicit empty (off)
+//	RUNNER_JOB_WORKDIR       absolute same-path work folder or explicit empty (off)
 //
 // The script's stdout/stderr are inherited so the container's job log streams
 // straight through, and a non-zero exit becomes a non-nil error so the listener
@@ -84,11 +85,16 @@ func (c *ContainerProvisioner) Provision(ctx context.Context, req ProvisionReque
 	// table. Devices are space-joined so the bash provisioner word-splits them
 	// into one --device per node. The socket value overrides any inherited
 	// setting, including when the type leaves the socket off.
+	workDir := ""
+	if req.DockerSocket != "" {
+		workDir = req.JobWorkDir
+	}
 	cmd.Env = append(os.Environ(),
 		"RUNNER_DEVICES="+strings.Join(req.Devices, " "),
 		"RUNNER_RUNTIME="+req.Runtime,
 		"RUNNER_BUILD_TOOL="+req.BuildTool,
 		"RUNNER_DOCKER_SOCKET="+req.DockerSocket,
+		"RUNNER_JOB_WORKDIR="+workDir,
 	)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("provision job %s: %w", req.JobID, err)

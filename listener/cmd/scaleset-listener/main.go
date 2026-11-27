@@ -118,9 +118,10 @@ func main() {
 		// (#117/#119): devices for precise --device passthrough, the container
 		// runtime shim, and the daemonless build tool. Empty in the discrete-env
 		// path.
-		devices   []string
-		runtime   string
-		buildTool string
+		devices      []string
+		runtime      string
+		buildTool    string
+		dockerSocket string
 	)
 	if cfgPath := os.Getenv("RUNNER_TYPES_CONFIG"); cfgPath != "" {
 		inst, err := selectInstance(cfgPath, os.Getenv("RUNNER_TYPE"), deps)
@@ -132,6 +133,7 @@ func main() {
 		devices = inst.Config.Devices
 		runtime = inst.Config.Runtime
 		buildTool = inst.Config.BuildTool
+		dockerSocket = inst.Config.DockerSocket
 		reserve = inst.Config.Reserve
 		// Carry exactly the seam this type resolved to: a device-sized (GPU) type
 		// gets the detector and no probe; a reactive type gets the probe and no
@@ -185,7 +187,7 @@ func main() {
 	// minting lives on the Go side of the boundary).
 	minter := &listener.ClientJITMinter{Client: client, ScaleSetID: scaleSet.ID}
 	prov := &listener.ContainerProvisioner{Script: resolveScriptPath(exe, "PROVISION_SCRIPT", "provision-job.sh")}
-	reaper := &listener.ScriptReaper{Script: resolveScriptPath(exe, "REAP_SCRIPT", "reap.sh")}
+	reaper := &listener.ScriptReaper{Script: resolveScriptPath(exe, "REAP_SCRIPT", "reap.sh"), Image: image}
 	// Structured per-job logging (#131): one record per finished job (id, image,
 	// exit, duration) plus periodic capacity/in-flight snapshots, emitted via slog
 	// to stderr, which journald captures when this runs as a systemd unit.
@@ -198,6 +200,7 @@ func main() {
 		Devices:        devices,
 		Runtime:        runtime,
 		BuildTool:      buildTool,
+		DockerSocket:   dockerSocket,
 		JobLogger:      listener.NewJournalJobLogger(),
 	})
 

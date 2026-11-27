@@ -25,12 +25,18 @@ type ClientJITMinter struct {
 // only carries the runner name + work folder (the scale set already pins the
 // labels for its runners), so they are accepted for the interface but the scale
 // set's own configuration governs labels.
-func (m *ClientJITMinter) Mint(ctx context.Context, name string, _ []string) (string, error) {
+func (m *ClientJITMinter) Mint(ctx context.Context, name string, _ []string, workFolder string) (string, error) {
+	if workFolder == "" {
+		workFolder = "_work"
+	}
+	// HostContext.GetDirectory (WellKnownDirectory.Work) combines the runner
+	// root with settings.WorkFolder. An absolute WorkFolder overrides the root.
+	// https://github.com/actions/runner/blob/main/src/Runner.Common/HostContext.cs#L385-L393
 	cfg, err := m.Client.GenerateJitRunnerConfig(
 		ctx,
 		&scaleset.RunnerScaleSetJitRunnerSetting{
 			Name:       name,
-			WorkFolder: "_work",
+			WorkFolder: workFolder,
 		},
 		m.ScaleSetID,
 	)

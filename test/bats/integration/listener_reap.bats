@@ -18,6 +18,8 @@ setup() {
 
   STUB=$(mktemp -d)
   RM_CAP="${WORK}/rm.args"
+  PURGE_CAP="${WORK}/purge.args"
+  unset RUNNER_PURGE_IMAGE
   PS_OUT="${WORK}/ps.out"          # scripted `docker ps` inventory: one container ID per line
   INSPECT_DIR="${WORK}/inspect"    # per-id "<key>" inspect answers
   mkdir -p "${INSPECT_DIR}"
@@ -46,15 +48,28 @@ case "\$1" in
     if [ -f "\$f" ]; then cat "\$f"; else exit 1; fi
     ;;
   rm) shift; printf '%s\n' "\$@" >> "${RM_CAP}" ;;
+  run)
+    printf '%s\n' "\$@" >> "${PURGE_CAP}"
+    for arg in "\$@"; do
+      case "\$arg" in
+        "${RUNNER_WORK_ROOT}/jit-orphan.0123abcd:/purge:Z")
+          /bin/rm -- "${RUNNER_WORK_ROOT}/jit-orphan.0123abcd/locked" ;;
+      esac
+    done
+    ;;
   *) : ;;
 esac
 exit 0
 EOF
   chmod +x "${STUB}/docker"
+  ln -s docker "${STUB}/podman"
   PATH="${STUB}:/bin:/usr/bin"
 }
 
-teardown() { rm -rf "${WORK}" "${STUB}"; }
+teardown() {
+  hash -r
+  /bin/rm -rf "${WORK}" "${STUB}"
+}
 
 # Register a container in the scripted inventory: inv <id> <job-id> [managed-by].
 inv() {
@@ -110,4 +125,31 @@ inv() {
   run "${SCRIPT}" live
   [ "${status}" -eq 0 ]
   [ -d "${RUNNER_HOME}/work/jit-live.XYZ" ]
+}
+
+@test "reap.sh purges a stale socket workdir with protected entries and spares a tracked workdir" {
+  local orphan="${RUNNER_WORK_ROOT}/jit-orphan.0123abcd"
+  local tracked="${RUNNER_WORK_ROOT}/jit-live.abcdef12"
+  mkdir "${orphan}" "${tracked}"
+  touch "${orphan}/locked" "${tracked}/keep"
+  cat > "${STUB}/rm" <<'STUB'
+#!/usr/bin/env bash
+orphan="${RUNNER_WORK_ROOT}/jit-orphan.0123abcd"
+for arg; do
+  if [[ "${arg}" == "${orphan}" && -f "${orphan}/locked" ]]; then
+    exit 1
+  fi
+done
+exec /bin/rm "$@"
+STUB
+  chmod +x "${STUB}/rm"
+  export RUNNER_PURGE_IMAGE=socket-runner-image
+
+  run "${SCRIPT}" live
+  [ "${status}" -eq 0 ]
+  [ -f "${tracked}/keep" ]
+  [ ! -e "${orphan}" ]
+  grep -qxF -- "${RUNNER_PURGE_IMAGE}" "${PURGE_CAP}"
+  grep -qxF -- "${orphan}:/purge:Z" "${PURGE_CAP}"
+  ! grep -qF -- "${tracked}" "${PURGE_CAP}"
 }
