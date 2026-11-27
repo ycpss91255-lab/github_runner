@@ -66,6 +66,18 @@
 # dropping a runtime the operator asked for.
 : "${RUNNER_RUNTIME:=}"
 
+# The runner's home INSIDE the image: where the bundled actions/runner (run.sh,
+# config.sh, bin/) lives and where the job runs from. Both the self-built images
+# (images/runner-base.Dockerfile: WORKDIR /home/runner, USER runner) and the
+# official ghcr.io/actions/actions-runner image use this layout. The container
+# works from here, and NOTHING from the host is mounted over it: the per-job
+# host dir is fresh and empty (and 0700, owned by the service user, while the
+# container runs as uid 1001), so binding it here hid run.sh and every job died
+# with `./run.sh: not found` (rc 127). The job's _work and _diag therefore live
+# in the container's own writable layer, which --rm destroys with the job.
+# Overridable for an image that installs the runner elsewhere.
+: "${RUNNER_CONTAINER_HOME:=/home/runner}"
+
 # runner_work_root -- the SINGLE source of truth for the per-job work root, the
 # dir provision-job.sh creates each job's runner dir under (mktemp -d
 # "<root>/jit-<id>.XXXXXX") and reap.sh prunes leaked dirs from. BOTH halves MUST
@@ -159,13 +171,16 @@ runner_container_cli() {
 # (#136), never on the host `<cli> run` argv, so it stays off the host process
 # table; run.sh reads it from $JITCONFIG inside the container's own namespace.
 # Rootless-appropriate: --init reaps the runner's child PIDs (no host init); the
-# baseline hardening flags (#114) and the :Z-relabelled mount (#115, MAC kept
-# enforced) keep it an unprivileged, self-contained unit. When a job id is given,
+# baseline hardening flags (#114) and MAC kept enforced (#115: no label=disable,
+# any opt-in bind mount relabelled :Z) keep it an unprivileged, self-contained
+# unit. When a job id is given,
 # the container gets a DETERMINISTIC
 # --name and managed-by + job-id --labels (#104) so the reaper (#105) can
 # correlate and remove orphans. PROPAGATES the in-container job's exit status (it
-# is the whole job lifecycle). The runner dir is mounted so the bundled run.sh
-# runs from inside the container against the JIT config.
+# is the whole job lifecycle). The image's bundled run.sh runs from
+# RUNNER_CONTAINER_HOME inside the container. <dir> is the per-job HOST dir; it
+# is NOT mounted into the container (it only anchors the credential env-file
+# sibling below and the work-root bookkeeping the reaper sweeps).
 runner_container_run() {
   local dir=$1 encoded=$2 image=$3 job_id=${4:-} cli line
   cli=$(runner_container_cli) || {
@@ -236,14 +251,13 @@ runner_container_run() {
   # procfs. Delivering via the env (ACTIONS_RUNNER_INPUT_JITCONFIG, which the
   # official runner reads natively) keeps the secret on /proc/<pid>/environ
   # (ptrace-protected) and off the world-readable cmdline end to end.
-  # The env-file MUST live OUTSIDE the bind-mounted runner dir (#140). `${dir}`
-  # is mounted READ-WRITE at /runner and IS the job's working directory, so a
-  # file written under it (`${dir}/.jitconfig.env`) is visible to -- and copyable
-  # by -- the hostile job at /runner/.jitconfig.env. The job could then plant the
-  # single-use credential into /runner/_diag, which the history hook durably
-  # archives, surviving the --rm teardown. Writing the env-file as a SIBLING of
-  # the mounted dir keeps the credential out of every job-reachable path while
-  # the engine still reads its VALUE from the file (never the host argv, #136).
+  # The env-file MUST live OUTSIDE `${dir}` (#140). `${dir}` used to be mounted
+  # READ-WRITE as the job's working directory, so a file written under it
+  # (`${dir}/.jitconfig.env`) was visible to -- and copyable by -- the hostile
+  # job, which could plant the single-use credential into _diag. `${dir}` is no
+  # longer mounted at all, but the sibling placement is kept so that no future
+  # mount of the per-job dir can ever expose the credential file. The engine
+  # still reads its VALUE from the file (never the host argv, #136).
   # The sibling sits beside `${dir}` under the same throwaway work root, so the
   # caller's `rm -rf "${runner_dir}"` does not remove it -- we delete it here on
   # return (success or failure) via a RETURN trap so the credential file does not
@@ -283,8 +297,11 @@ runner_container_run() {
   # do NOT add `--jitconfig "${JITCONFIG}"` back here -- that re-exposes it.
   local run_in_container='./run.sh'
 
-  # Bind the runner dir with :Z so the engine relabels it for this container
-  # (#115) -- MAC (SELinux/AppArmor) stays ENFORCED; we never disable it.
+  # Work from the image's runner home, where run.sh lives. No host dir is bound
+  # over it (see RUNNER_CONTAINER_HOME): the job's state stays in the container's
+  # writable layer and --rm removes it, so nothing survives the job. MAC
+  # (SELinux/AppArmor) stays ENFORCED (#115): the only bind mount is the opt-in
+  # socket above, relabelled :Z; we never pass label=disable.
   "${cli}" run --rm --init \
     "${hardening_args[@]}" \
     "${socket_args[@]}" \
@@ -292,7 +309,7 @@ runner_container_run() {
     "${runtime_args[@]}" \
     "${id_args[@]}" \
     --env-file "${env_file}" \
-    -v "${dir}:/runner:Z" -w /runner \
+    -w "${RUNNER_CONTAINER_HOME}" \
     "${image}" \
     sh -c "${run_in_container}"
 }

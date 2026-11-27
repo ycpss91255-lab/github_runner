@@ -79,6 +79,18 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Listener jobs no longer fail with `./run.sh: not found`.** The per-job
+  container bound the fresh, empty per-job host dir over `/runner` and ran
+  `./run.sh` from there, so the runner the image ships at `/home/runner` was
+  never reached and every job exited 127. The host dir was also 0700 and owned
+  by the service user while the container runs as uid 1001, so the job could not
+  have written to it either. The container now works from the image's runner
+  home (`RUNNER_CONTAINER_HOME`, default `/home/runner`) and no host directory is
+  mounted into a job: `_work` and `_diag` live in the container's writable layer
+  and `--rm` removes them. The JIT credential still reaches the runner only via
+  the sibling `--env-file` (#136, #140, #155), and no `--privileged` or
+  `label=disable` is used.
+
 - **`require_gh_auth` no longer hangs on a host with a locked GNOME Keyring.**
   It ran `gh auth status`, which asks the Secret Service about every stored
   account; in a headless/SSH session the unlock prompt can never show, so the
