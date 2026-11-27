@@ -8,6 +8,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **CI builds and publishes the self-built runner images to ghcr.io.** The new
+  `runner images` workflow builds `ghcr.io/ycpss91255-lab/runner-base` and
+  `ghcr.io/ycpss91255-lab/gpu-runner`, tagged with the runner version, on a
+  GitHub-hosted runner, through `images/build-runner-image.sh` (so the runner
+  tarball still passes the strict SEC-5 check) and `images/runner-gpu.Dockerfile`
+  (FROM the base by the digest just pushed). It publishes on a push to `main`
+  that changes `images/**` and on `workflow_dispatch`, which takes an optional
+  `runner_version`. A pull request only builds. Only the publish job holds
+  `packages: write`. The job summary prints both digests and the `image:` line
+  to pin. Each image carries an `org.opencontainers.image.source` label and a
+  signed build provenance attestation. The manual build in `deploy/README.md`
+  section 3b remains as the fallback.
+
 - **`script/lint-doc-citations.sh` now reads the `.html` documents under `doc/`.**
   It collected `doc/**/*.md` only, so `doc/arch/` -- an HTML directory by
   convention -- was unchecked, and its `0 violations` said nothing about the one

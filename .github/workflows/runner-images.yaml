@@ -1,0 +1,247 @@
+name: runner images
+
+# Builds the self-built runner images (deploy/README.md section 3b) and
+# publishes them to ghcr.io, so no host pushes them by hand:
+#   ghcr.io/ycpss91255-lab/runner-base:<runner-version>  -- SEC-5 base (#120)
+#   ghcr.io/ycpss91255-lab/gpu-runner:<runner-version>   -- CUDA on that base (#121)
+#
+# It builds through the repo's own entry points, never a parallel copy of them:
+# images/build-runner-image.sh obtains the runner tarball and verifies it STRICT
+# (verify_runner_tarball) before docker build is reached, and the GPU layer is
+# images/runner-gpu.Dockerfile, FROM the base by the digest just pushed.
+#
+# Publishing is a supply-chain boundary, so the trigger set is narrow:
+#   * workflow_dispatch on main -- the operator's "publish now", optionally for
+#     a pinned runner version.
+#   * push to main touching images/** -- the image definition changed.
+#   * pull_request -- build only. That job has a read-only token, no registry
+#     login and no push; only the publish job holds packages: write, and it
+#     never runs for a pull_request event. pull_request_target is never used.
+# Every job runs on a GitHub-hosted runner: a self-hosted one would put the
+# registry token on hardware that runs other people's jobs.
+on:
+  workflow_dispatch:
+    inputs:
+      runner_version:
+        description: 'actions/runner version to bake in (e.g. 2.334.0). Empty = what resolve_runner_version resolves (the latest release).'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'images/**'
+  pull_request:
+    paths:
+      - 'images/**'
+      - 'lib/runner-release.sh'
+      - '.github/workflows/runner-images.yaml'
+
+# Least privilege by default; the publish job widens it for itself only.
+permissions:
+  contents: read
+
+# One publish per ref at a time, so two pushes cannot race on the same tag. A
+# superseded PR build is cancelled; a publish is not, so a tag is never left
+# half-written.
+concurrency:
+  group: runner-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BASE_IMAGE_NAME: ghcr.io/ycpss91255-lab/runner-base
+  GPU_IMAGE_NAME: ghcr.io/ycpss91255-lab/gpu-runner
+
+jobs:
+  build:
+    # Proves the images still build from this PR's tree. Nothing leaves the
+    # runner: no login, no push, read-only token.
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # The same resolution the scripts use (lib/runner-release.sh): latest
+      # release via gh, else the static fallback.
+      - name: resolve the runner version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(bash -c 'source lib/common.sh && resolve_runner_version')
+          echo "runner version: ${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      # gh is the SEC-5 prereq: the tarball digest is fetched and verified
+      # strict, and any mismatch aborts before docker build runs.
+      - name: build runner-base (SEC-5 verified tarball)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+        run: images/build-runner-image.sh --tag runner-base:ci
+
+      - name: build gpu-runner on the local base
+        env:
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          ctx=$(mktemp -d)
+          docker build -f images/runner-gpu.Dockerfile \
+            --build-arg RUNNER_BASE_IMAGE=runner-base:ci \
+            --build-arg "RUNNER_VERSION=${RUNNER_VERSION}" \
+            -t gpu-runner:ci "${ctx}"
+
+      - name: the baked runner reports the resolved version
+        env:
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          for img in runner-base:ci gpu-runner:ci; do
+            got=$(docker run --rm "${img}" ./bin/Runner.Listener --version)
+            echo "${img}: ${got}"
+            [[ ${got} == "${RUNNER_VERSION}" ]]
+          done
+
+  publish:
+    # Never for a pull_request event, and only from main: a dispatch from a
+    # branch must not overwrite the tags every host pins from.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Replaces the workflow default for this job only. packages: push to
+    # ghcr.io. id-token + attestations + artifact-metadata: sign and store the
+    # build provenance attestation (actions/attest).
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # A dispatch input reaches the shell through env only (never inlined into
+      # the script), and is held to a bare x.y.z before anything uses it.
+      - name: resolve the runner version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_RUNNER_VERSION: ${{ inputs.runner_version }}
+        run: |
+          set -euo pipefail
+          requested=${INPUT_RUNNER_VERSION:-}
+          requested=${requested#v}
+          if [[ -n ${requested} ]]; then
+            [[ ${requested} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+              echo "::error::runner_version must be x.y.z, got '${INPUT_RUNNER_VERSION}'"
+              exit 1
+            }
+            export RUNNER_VERSION=${requested}
+          fi
+          version=$(bash -c 'source lib/common.sh && resolve_runner_version')
+          echo "runner version: ${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: log in to ghcr.io
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: printf '%s' "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USER}" --password-stdin
+
+      - name: build runner-base (SEC-5 verified tarball)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+        run: images/build-runner-image.sh --tag runner-base:build
+
+      # build-runner-image.sh takes no --label, so the OCI labels are added in
+      # a metadata-only layer on top (LABEL adds no filesystem layer). The
+      # source label is what attaches the ghcr.io package to this repository.
+      - name: label and push runner-base
+        id: base
+        env:
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          ref="${BASE_IMAGE_NAME}:${RUNNER_VERSION}"
+          printf 'FROM runner-base:build\n' | docker build \
+            --label "org.opencontainers.image.source=${IMAGE_SOURCE}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${RUNNER_VERSION}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            -t "${ref}" -
+          got=$(docker run --rm "${ref}" ./bin/Runner.Listener --version)
+          [[ ${got} == "${RUNNER_VERSION}" ]] || { echo "::error::${ref} reports runner ${got}"; exit 1; }
+          docker push "${ref}"
+          digest=$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ ${digest} == sha256:* ]] || { echo "::error::no digest for ${ref}"; exit 1; }
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      # FROM the base by the digest just pushed, so the GPU image is layered on
+      # exactly the verified base and both its FROMs are digest-pinned.
+      - name: build and push gpu-runner
+        id: gpu
+        env:
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+          IMAGE_SOURCE: ${{ github.server_url }}/${{ github.repository }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ref="${GPU_IMAGE_NAME}:${RUNNER_VERSION}"
+          base="${BASE_IMAGE_NAME}@${BASE_DIGEST}"
+          ctx=$(mktemp -d)
+          docker build -f images/runner-gpu.Dockerfile \
+            --build-arg "RUNNER_BASE_IMAGE=${base}" \
+            --build-arg "RUNNER_VERSION=${RUNNER_VERSION}" \
+            --label "org.opencontainers.image.source=${IMAGE_SOURCE}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --label "org.opencontainers.image.version=${RUNNER_VERSION}" \
+            --label "org.opencontainers.image.licenses=Apache-2.0" \
+            --label "org.opencontainers.image.base.name=${base}" \
+            --label "org.opencontainers.image.base.digest=${BASE_DIGEST}" \
+            -t "${ref}" "${ctx}"
+          got=$(docker run --rm "${ref}" ./bin/Runner.Listener --version)
+          [[ ${got} == "${RUNNER_VERSION}" ]] || { echo "::error::${ref} reports runner ${got}"; exit 1; }
+          docker push "${ref}"
+          digest=$(docker buildx imagetools inspect "${ref}" --format '{{json .Manifest}}' | jq -r .digest)
+          [[ ${digest} == sha256:* ]] || { echo "::error::no digest for ${ref}"; exit 1; }
+          echo "digest=${digest}" >> "${GITHUB_OUTPUT}"
+
+      - name: attest runner-base provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.BASE_IMAGE_NAME }}
+          subject-digest: ${{ steps.base.outputs.digest }}
+          push-to-registry: true
+
+      - name: attest gpu-runner provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.GPU_IMAGE_NAME }}
+          subject-digest: ${{ steps.gpu.outputs.digest }}
+          push-to-registry: true
+
+      # The digests are what an operator pins: deploy/runner-types.sample.yaml
+      # takes the gpu type's image: by @sha256, never by tag.
+      - name: job summary
+        env:
+          RUNNER_VERSION: ${{ steps.version.outputs.version }}
+          BASE_DIGEST: ${{ steps.base.outputs.digest }}
+          GPU_DIGEST: ${{ steps.gpu.outputs.digest }}
+        run: |
+          {
+            echo "## Published runner images (runner ${RUNNER_VERSION})"
+            echo
+            echo "| image | tag | digest |"
+            echo "| --- | --- | --- |"
+            echo "| \`${BASE_IMAGE_NAME}\` | \`${RUNNER_VERSION}\` | \`${BASE_DIGEST}\` |"
+            echo "| \`${GPU_IMAGE_NAME}\` | \`${RUNNER_VERSION}\` | \`${GPU_DIGEST}\` |"
+            echo
+            echo "Pin the gpu runner type by digest (deploy/runner-types.yaml):"
+            echo
+            echo '```yaml'
+            echo "image: ${GPU_IMAGE_NAME}@${GPU_DIGEST}"
+            echo '```'
+          } >> "${GITHUB_STEP_SUMMARY}"
