@@ -22,10 +22,14 @@ import (
 type fakeSession struct {
 	mu             sync.Mutex
 	messages       []*scaleset.RunnerScaleSetMessage // scripted, drained front-to-back
-	getErr         error                             // returned once messages are drained (a real transport error)
-	cancel         context.CancelFunc                // if set, called when messages drain to end the loop via ctx
-	polledAfter    []int                             // lastMessageID passed to each GetMessage
-	protocol       []string                          // acquire and ack calls in order
+	beforePoll     func(lastMessageID int)
+	afterDelete    func()
+	acquireCtx     []error
+	checkContext   bool
+	getErr         error              // returned once messages are drained (a real transport error)
+	cancel         context.CancelFunc // if set, called when messages drain to end the loop via ctx
+	polledAfter    []int              // lastMessageID passed to each GetMessage
+	protocol       []string           // acquire and ack calls in order
 	closeErr       error
 	closeCtxErr    error     // context state when Close was called
 	reportedCap    []int     // maxCapacity passed to each GetMessage
@@ -35,6 +39,9 @@ type fakeSession struct {
 }
 
 func (f *fakeSession) GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
+	if f.beforePoll != nil {
+		f.beforePoll(lastMessageID)
+	}
 	f.mu.Lock()
 	f.polledAfter = append(f.polledAfter, lastMessageID)
 	f.reportedCap = append(f.reportedCap, maxCapacity)
@@ -57,9 +64,14 @@ func (f *fakeSession) GetMessage(ctx context.Context, lastMessageID int, maxCapa
 	return msg, nil
 }
 
-func (f *fakeSession) AcquireJobs(_ context.Context, requestIDs []int64) ([]int64, error) {
+func (f *fakeSession) AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error) {
 	f.protocol = append(f.protocol, "acquire")
 	f.acquiredReqIDs = append(f.acquiredReqIDs, slices.Clone(requestIDs))
+	err := ctx.Err()
+	f.acquireCtx = append(f.acquireCtx, err)
+	if f.checkContext && err != nil {
+		return nil, err
+	}
 	return requestIDs, nil
 }
 
@@ -68,6 +80,9 @@ func (f *fakeSession) DeleteMessage(_ context.Context, messageID int) error {
 	f.protocol = append(f.protocol, fmt.Sprintf("ack %d", messageID))
 	f.deletedIDs = append(f.deletedIDs, messageID)
 	f.mu.Unlock()
+	if f.afterDelete != nil {
+		f.afterDelete()
+	}
 	return nil
 }
 
@@ -93,13 +108,20 @@ func (f *fakeSession) Close(ctx context.Context) error {
 // returns a scripted encoded config per job name and records every mint call so
 // a test can assert the assigned job was minted with the expected name.
 type recordingMinter struct {
-	config   string   // encoded JIT config to return
-	mintErr  error    // returned instead, if set
-	gotNames []string // job names passed to Mint
+	config       string   // encoded JIT config to return
+	mintErr      error    // returned instead, if set
+	gotNames     []string // job names passed to Mint
+	mintCtx      []error
+	checkContext bool
 }
 
-func (m *recordingMinter) Mint(_ context.Context, name string, _ []string) (string, error) {
+func (m *recordingMinter) Mint(ctx context.Context, name string, _ []string) (string, error) {
 	m.gotNames = append(m.gotNames, name)
+	err := ctx.Err()
+	m.mintCtx = append(m.mintCtx, err)
+	if m.checkContext && err != nil {
+		return "", err
+	}
 	if m.mintErr != nil {
 		return "", m.mintErr
 	}
@@ -1119,5 +1141,120 @@ func TestTrackedJobIDIsSanitizedToMatchContainerLabel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Listen did not return after the held job was released")
+	}
+}
+
+func TestListenDeduplicatesInFlightRawJobID(t *testing.T) {
+	const jobID, siblingID = "abcd", "ab\tcd"
+	if canonicalJobID(jobID) != canonicalJobID(siblingID) {
+		t.Fatal("fixture JobIDs must share a canonical key")
+	}
+
+	for _, duplicateInEnvelope := range []bool{false, true} {
+		name := "later envelope"
+		if duplicateInEnvelope {
+			name = "same envelope"
+		}
+		t.Run(name, func(t *testing.T) {
+			first := msgWithAssigned(1, 1, assigned(11, jobID))
+			duplicate := assigned(12, jobID)
+			sibling := assigned(13, siblingID)
+			messages := []*scaleset.RunnerScaleSetMessage{first}
+			lastBeforeRelease := 1
+			if duplicateInEnvelope {
+				first.JobAssignedMessages = append(first.JobAssignedMessages, duplicate, sibling)
+			} else {
+				messages = append(messages, msgWithAssigned(2, 2, duplicate, sibling))
+				lastBeforeRelease = 2
+			}
+			messages = append(messages, msgWithAssigned(3, 1, assigned(14, jobID)))
+
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{messages: messages, getErr: stop}
+			minter := &recordingMinter{config: "jit"}
+			prov := &recordingProvisioner{
+				started: make(chan struct{}, 4),
+				block:   make(chan struct{}),
+			}
+			l := New(sess, minter, prov, Config{MaxRunners: 4})
+			sess.beforePoll = func(lastMessageID int) {
+				if lastMessageID == 1 && !duplicateInEnvelope {
+					select {
+					case <-prov.started:
+					case <-time.After(2 * time.Second):
+						t.Error("first job did not start before its redelivery")
+					}
+				}
+				if lastMessageID == lastBeforeRelease {
+					close(prov.block)
+					l.wg.Wait()
+				}
+			}
+
+			if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if want := []string{jobID, siblingID, jobID}; !slices.Equal(minter.gotNames, want) {
+				t.Errorf("Mint names = %q, want %q", minter.gotNames, want)
+			}
+			var provisioned []int64
+			for _, req := range prov.jobs {
+				provisioned = append(provisioned, req.RequestID)
+			}
+			slices.Sort(provisioned)
+			if want := []int64{11, 13, 14}; !slices.Equal(provisioned, want) {
+				t.Errorf("provisioned request IDs = %v, want %v", provisioned, want)
+			}
+			if len(minter.gotNames) != len(provisioned) {
+				t.Errorf("Mint called %d times for %d provisions", len(minter.gotNames), len(provisioned))
+			}
+		})
+	}
+}
+
+func TestListenProcessesAcknowledgedEnvelopeAfterCancellation(t *testing.T) {
+	for _, operation := range []string{"AcquireJobs", "Mint"} {
+		t.Run(operation, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			msg := &scaleset.RunnerScaleSetMessage{MessageID: 17}
+			if operation == "AcquireJobs" {
+				msg.JobAvailableMessages = []*scaleset.JobAvailable{
+					{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 41}},
+				}
+			} else {
+				msg.JobAssignedMessages = []*scaleset.JobAssigned{assigned(42, "job-abc")}
+			}
+			sess := &fakeSession{
+				messages:     []*scaleset.RunnerScaleSetMessage{msg},
+				afterDelete:  cancel,
+				checkContext: true,
+			}
+			minter := &recordingMinter{config: "jit", checkContext: true}
+			l := New(sess, minter, &recordingProvisioner{}, Config{})
+
+			if err := l.Listen(ctx); err != nil {
+				t.Errorf("Listen returned %v after cancellation, want nil", err)
+			}
+			if got := sess.ackedIDs(); !slices.Equal(got, []int{17}) {
+				t.Errorf("acknowledged envelopes = %v, want [17]", got)
+			}
+			if operation == "AcquireJobs" {
+				if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{41}) {
+					t.Errorf("AcquireJobs batches = %v, want [[41]]", sess.acquiredReqIDs)
+				}
+				if !slices.Equal(sess.acquireCtx, []error{nil}) {
+					t.Errorf("AcquireJobs context errors = %v, want [nil]", sess.acquireCtx)
+				}
+			} else {
+				if !slices.Equal(minter.gotNames, []string{"job-abc"}) {
+					t.Errorf("Mint names = %v, want [job-abc]", minter.gotNames)
+				}
+				if !slices.Equal(minter.mintCtx, []error{nil}) {
+					t.Errorf("Mint context errors = %v, want [nil]", minter.mintCtx)
+				}
+			}
+		})
 	}
 }

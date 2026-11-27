@@ -466,3 +466,17 @@ EOF
   # The unit runs from the same prefix.
   grep -qx "ExecStart=${expected%/runners}/bin/scaleset-listener" "${unit}"
 }
+
+@test "a rerun warns on stderr to rotate the token from a non-0600 environment file" {
+  local file="${ETC}/scaleset-listener.env" token='existing-fixture-token'
+  install -d -m 0755 "${ETC}"
+  install -m 0644 /dev/null "${file}"
+  printf 'GITHUB_TOKEN=%s\n' "${token}" > "${file}"
+
+  _deploy > "${WORK}/stdout" 2> "${WORK}/stderr"
+  [ "$(stat -c '%a' "${file}")" = 600 ]
+  ! grep -qF "${token}" "${WORK}/stdout" "${WORK}/stderr"
+  grep -qE 'WARNING.*0600' "${WORK}/stderr"
+  grep -qiE 'token.*expos' "${WORK}/stderr"
+  grep -qiF 'rotate' "${WORK}/stderr"
+}

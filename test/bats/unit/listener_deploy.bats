@@ -852,3 +852,55 @@ teardown() { rm -rf "${WORK}"; }
   [[ "${output}" != *"organisation"* ]]
   [[ "${output}" != *"repository"* ]]
 }
+
+@test "listener_backfill_env_file fills empty derived settings and preserves explicit values" {
+  local file="${WORK}/listener.env" prefix="${WORK}/opt"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/my-org' \
+    'SCALE_SET_OWNER=' 'RUNNER_TYPE=' 'PROVISION_SCRIPT=' \
+    'REAP_SCRIPT=/custom/reap.sh' > "${file}"
+
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_PREFIX=$3
+    listener_backfill_env_file "$2" https://github.com/my-org /c.yaml gpu
+  ' _ "${LIB}" "${file}" "${prefix}"
+  [ "${status}" -eq 0 ]
+  grep -qxF 'REAP_SCRIPT=/custom/reap.sh' "${file}"
+  grep -qxF 'GITHUB_CONFIG_URL=https://github.com/my-org' "${file}"
+  grep -qxF 'SCALE_SET_OWNER=my-org' "${file}"
+  grep -qxF 'RUNNER_TYPE=gpu' "${file}"
+  grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
+}
+
+@test "listener_backfill_env_file rejects a config URL without an owner" {
+  local file="${WORK}/listener.env"
+  install -m 0600 /dev/null "${file}"
+  printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com' > "${file}"
+
+  run bash -c '
+    set -e
+    source "$1"
+    listener_backfill_env_file "$2" https://github.com /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *SCALE_SET_OWNER* ]]
+  ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+}
+
+@test "listener_write_env_file rejects a config URL without an owner" {
+  local file="${WORK}/listener.env"
+
+  run bash -c '
+    set -e
+    source "$1"
+    LISTENER_TOKEN=fixture-token
+    listener_write_env_file "$2" https://github.com /c.yaml gpu
+  ' _ "${LIB}" "${file}"
+  [ "${status}" -ne 0 ]
+  [[ "${output}" == *SCALE_SET_OWNER* ]]
+  if [[ -f ${file} ]]; then
+    ! grep -qxF 'SCALE_SET_OWNER=' "${file}"
+  fi
+}
