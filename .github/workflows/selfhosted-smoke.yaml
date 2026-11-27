@@ -13,6 +13,10 @@ on:
         description: 'runs-on labels as a JSON array -- must match the runner type''s labels exactly'
         required: false
         default: '["self-hosted","Linux","X64","gpu"]'
+      docker:
+        description: 'also prove the host Docker daemon and same-path bind mounts work (docker_socket types only)'
+        required: false
+        default: 'false'
 
 permissions:
   contents: read
@@ -96,3 +100,39 @@ jobs:
           else
             echo "nvidia-smi absent -- non-GPU host, or driver not installed"
           fi
+
+      - name: Prove host Docker and same-path bind mounts
+        # Opt-in (`-f docker=true`), for docker_socket types only. Fatal by
+        # design: on a socket type, a sibling container that cannot see the
+        # checkout breaks every Compose job. Same-path mounts resolve only
+        # because the provisioner mounts the work folder at the same absolute
+        # path on the host and in the job.
+        if: inputs.docker == 'true'
+        run: |
+          set -euo pipefail
+          docker version --format 'server {{.Server.Version}}'
+          echo "workspace=${GITHUB_WORKSPACE} temp=${RUNNER_TEMP}"
+          marker="dood-$(date +%s)"
+          echo "${marker}" > "${GITHUB_WORKSPACE}/marker.txt"
+          echo "${marker}" > "${RUNNER_TEMP}/marker.txt"
+          docker run --rm -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" alpine:3.20 cat "${GITHUB_WORKSPACE}/marker.txt" | grep -qx "${marker}"
+          docker run --rm -v "${RUNNER_TEMP}:/t" alpine:3.20 cat /t/marker.txt | grep -qx "${marker}"
+          printf 'FROM alpine:3.20\nCOPY marker.txt /m\n' > "${GITHUB_WORKSPACE}/Dockerfile.smoke"
+          docker build -q -f "${GITHUB_WORKSPACE}/Dockerfile.smoke" -t "dood-smoke:${marker}" "${GITHUB_WORKSPACE}" >/dev/null
+          docker run --rm "dood-smoke:${marker}" cat /m | grep -qx "${marker}"
+          docker image rm "dood-smoke:${marker}" >/dev/null
+          docker compose version
+          docker buildx version
+          docker buildx build -q --load -f "${GITHUB_WORKSPACE}/Dockerfile.smoke" -t "dood-bx:${marker}" "${GITHUB_WORKSPACE}" >/dev/null
+          docker run --rm "dood-bx:${marker}" cat /m | grep -qx "${marker}"
+          docker image rm "dood-bx:${marker}" >/dev/null
+          cat > "${GITHUB_WORKSPACE}/compose.smoke.yaml" <<YAML
+          services:
+            ci:
+              image: alpine:3.20
+              working_dir: /src
+              volumes: ["./:/src"]
+              command: ["cat", "marker.txt"]
+          YAML
+          (cd "${GITHUB_WORKSPACE}" && docker compose -f compose.smoke.yaml run --rm ci) | grep -qx "${marker}"
+          echo "DooD OK: docker run, docker build and compose bind mount all see the checkout"
