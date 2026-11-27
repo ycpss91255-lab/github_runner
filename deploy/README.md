@@ -393,9 +393,12 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
   --group-add "$(stat -c %g /var/run/docker.sock)" gpu-runner:2.338.2 docker info
 ```
 
-After the first publish that carries the docker CLI, pin the sample GPU type:
-copy the `ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line from the
-workflow's job summary into the gpu type's `image:` and uncomment
+The first GPU image publish that carries the docker CLI is done and the
+package is public: the sample gpu type pins
+`ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d`
+(actions-runner 2.338.2). After each later publish of the gpu image, copy the
+new `ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line from the
+workflow's job summary into the gpu type's `image:`, and uncomment
 `docker_socket` only for trusted jobs.
 
 > **A GPU job actually executing is HITL.** The images *build* and are wired
@@ -545,6 +548,10 @@ runner_types:
 
 An omitted `runner_group` means `Default`, so an existing single-group install
 keeps working unchanged.
+
+The fleet currently deployed this way (hosts, groups, images, smoke commands,
+open items and a restore log of every host change) is recorded in the
+[fleet runbook](../doc/runbook/FLEET.md).
 
 ## 4. Install, enable & start the legacy unit by hand
 

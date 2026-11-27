@@ -15,6 +15,8 @@ setup() {
   CURRENT_VERSION="2.338.2"
   STOCK_CPU_IMAGE="ghcr.io/actions/actions-runner@sha256:6d0b2d80d80f143f77dcb676e50920100bbb547e39e883454d57f45ab8c31300"
   PUBLISHED_CPU_IMAGE="ghcr.io/ycpss91255-lab/runner-cpu@sha256:9e622508b7a16bcc4805f3ace3cc6490935e2a4bddaf2ba43380bbcef7de024f"
+  # gpu-runner 2.338.2 as published by the runner images workflow.
+  PUBLISHED_GPU_IMAGE="ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d"
 }
 
 # Print the CPU image and its immediately preceding line.
@@ -100,9 +102,11 @@ fallback_version() {
   [ "$(fallback_version)" = "${CURRENT_VERSION}" ]
 }
 
+# The fleet restore log (doc/runbook/FLEET.md) is history: it names the old
+# version because the backup files on the hosts carry it, so it is exempt.
 @test "obsolete runner digest and version are absent from shipped files" {
   run grep -rIFn --exclude-dir=.git --exclude-dir=test --exclude-dir=coverage \
-    --exclude=coverage.func --exclude='*_test.go' \
+    --exclude=coverage.func --exclude='*_test.go' --exclude=FLEET.md \
     -e '08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29' \
     -e '2.335.1' "${ROOT}"
   [ "${status}" -eq 1 ]
@@ -177,4 +181,42 @@ gpu_entry() {
   ' "${CHANGELOG}")"
   grep -qF 'ghcr.io/ycpss91255-lab/gpu-runner' <<<"${unreleased}"
   grep -qF 'docker: command not found' <<<"${unreleased}"
+}
+
+# The gpu image line and its immediately preceding line.
+gpu_image_with_previous_line() {
+  awk '
+    /^  - name: / { gpu = ($0 == "  - name: gpu") }
+    gpu && /^    image: / { print previous; print; exit }
+    { previous = $0 }
+  ' "${SAMPLE}"
+}
+
+@test "sample GPU image pins the published gpu-runner digest" {
+  image="$(gpu_image_with_previous_line | sed -n '2s/^    image: //p')"
+  [ "${image}" = "${PUBLISHED_GPU_IMAGE}" ]
+}
+
+@test "GPU image is immediately preceded by an actions-runner version matching the fallback" {
+  version="$(gpu_image_with_previous_line |
+    sed -nE '1s/^[[:space:]]*# actions-runner ([0-9]+\.[0-9]+\.[0-9]+)([[:space:]].*)?$/\1/p')"
+  [ "${version}" = "$(fallback_version)" ]
+}
+
+@test "sample no longer ships the placeholder gpu image" {
+  run grep -F 'your-org/gpu-runner' "${SAMPLE}"
+  [ "${status}" -eq 1 ]
+}
+
+# The fleet pattern in production: every host serves a scale set named after
+# its type, in its own runner group, with identical labels.
+@test "sample types use the fleet scale set names with a commented per-host runner_group" {
+  for type in gpu cpu; do
+    entry="$(awk -v t="  - name: ${type}" '
+      /^  - name: / { on = ($0 == t) }
+      on { print }
+    ' "${SAMPLE}")"
+    grep -qxF "    scale_set: ${type}" <<<"${entry}"
+    grep -qxF '    # runner_group: ci-<host>' <<<"${entry}"
+  done
 }

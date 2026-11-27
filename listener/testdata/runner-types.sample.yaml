@@ -82,18 +82,23 @@ runner_types:
   # precisely (no --privileged); the baseline container hardening + the ADR-0011
   # approval gate keep unapproved untrusted code off this rootful device host.
   - name: gpu
-    scale_set: gpu-runners
+    # Fleet pattern (doc/runbook/FLEET.md): every host serves a scale set
+    # named after its type, in its own runner group, with identical labels,
+    # so a job assigned to a stopped host is requeued to another one.
+    scale_set: gpu
+    # This host's runner group. Omitted = Default.
+    # runner_group: ci-<host>
     labels: [self-hosted, linux, x64, gpu, cuda]
     # Self-built GPU image (#121): the CUDA/device stack layered on the SEC-5
     # base (images/runner-gpu.Dockerfile -> images/runner-base.Dockerfile, whose
-    # runner tarball passed verify_runner_tarball before being baked in). Build
-    # it with images/build-runner-image.sh (base) + a docker build of the GPU
-    # Dockerfile, push to your registry, and pin THIS by the resulting digest --
-    # never :latest. The 0000... below is a placeholder for the operator to fill.
-    # The image ships the docker CLI with pinned Compose and Buildx plugins;
-    # copy the digest from the runner images workflow's job summary after a
-    # publish (ghcr.io/ycpss91255-lab/gpu-runner).
-    image: ghcr.io/your-org/gpu-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    # runner tarball passed verify_runner_tarball before being baked in). It
+    # ships the docker CLI with pinned Compose and Buildx plugins. This pins
+    # the published ghcr.io/ycpss91255-lab/gpu-runner image by digest -- never
+    # :latest; after each publish copy the new digest from the runner images
+    # workflow's job summary. To use your own build, push it to your registry
+    # and pin that digest instead.
+    # actions-runner 2.338.2
+    image: ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d
     devices:
       - /dev/nvidia0
       - /dev/nvidiactl
@@ -120,7 +125,7 @@ runner_types:
   # RUNNER_VERSION_FALLBACK in lib/runner-release.sh together. test/bats/unit/runner_image_pin.bats
   # checks that they agree.
   - name: cpu
-    scale_set: cpu-runners
+    scale_set: cpu
     # This host's runner group (high availability: same scale_set and labels
     # on every host, one group per host). Omitted = Default.
     # runner_group: ci-<host>

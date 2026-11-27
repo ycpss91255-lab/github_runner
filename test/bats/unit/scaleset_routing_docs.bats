@@ -73,3 +73,18 @@ setup() {
   run grep -F 'runners/history' <<< "${migration}"
   [ "${status}" -eq 0 ]
 }
+
+@test "the fleet runbook exists and is linked from troubleshooting and the deploy README" {
+  [ -f "${ROOT}/doc/runbook/FLEET.md" ]
+  run grep -F '](FLEET.md)' "${ROOT}/doc/runbook/TROUBLESHOOTING.md"
+  [ "${status}" -eq 0 ]
+  run grep -F '](../doc/runbook/FLEET.md)' "${ROOT}/deploy/README.md"
+  [ "${status}" -eq 0 ]
+}
+
+@test "the fleet runbook carries the restore log and the failover finding" {
+  run grep -E '^## Restore log' "${ROOT}/doc/runbook/FLEET.md"
+  [ "${status}" -eq 0 ]
+  run grep -iF 'requeued' "${ROOT}/doc/runbook/FLEET.md"
+  [ "${status}" -eq 0 ]
+}

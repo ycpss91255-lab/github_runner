@@ -9,6 +9,10 @@ first diagnostic command, and a fix. All commands run from the repo checkout
 > (systemd) and `GITHUB` (control-plane) state side by side. A runner only
 > picks up jobs when it is `running` **and** `online`.
 
+> Scale-set listener fleet: which host serves which type, the smoke commands,
+> known open items and how to undo each host change are in the
+> [fleet runbook](FLEET.md).
+
 ## `status.sh` state → action
 
 ### `GITHUB = offline` (service `running`)

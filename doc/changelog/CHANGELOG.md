@@ -8,6 +8,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fleet runbook.** `doc/runbook/FLEET.md` records the interim scale-set
+  listener fleet as deployed on 2026-11-28 (hosts, runner groups, pinned
+  images, the verified failover behaviour, smoke commands, the Docker GC
+  timer, known open items) and a restore log of every host change with its
+  backup and undo command. Linked from the troubleshooting runbook and the
+  deployment guide.
 - **Per-type `runner_group` for high-availability scale sets.** A runner type
   may name the GitHub runner group its scale set lives in (`runner_group`,
   optional; empty means `Default`). The listener, `scaleset-admin create`,
@@ -135,6 +141,13 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   target, where naming the wrong one is an easy slip.
 
 ### Changed
+
+- **Sample gpu type pins the published gpu-runner image.** The gpu entry in
+  `deploy/runner-types.sample.yaml` now pins
+  `ghcr.io/ycpss91255-lab/gpu-runner@sha256:9d37990581dbf3ada886daeb1afca65e1482e0f6d70f83d2e3f9e499c41f933d`
+  (actions-runner 2.338.2, docker CLI with Compose and Buildx) instead of a
+  placeholder digest. Both sample types use the fleet scale set names `cpu`
+  and `gpu` with a commented `runner_group: ci-<host>` line.
 
 - **The sample CPU runner type uses the published runner-cpu image.**
   `deploy/runner-types.sample.yaml` now pins
