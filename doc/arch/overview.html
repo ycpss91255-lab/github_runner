@@ -438,17 +438,17 @@ td {
   <rect x="325" y="90" width="210" height="22" rx="3" fill="var(--surface)" stroke="var(--bash-soft)" stroke-width="1"/>
   <text x="430" y="106" text-anchor="middle" font-size="8" fill="var(--text-1)">runner-types.yaml (config)</text>
   <rect x="325" y="116" width="210" height="22" rx="3" fill="var(--surface)" stroke="var(--bash-soft)" stroke-width="1"/>
-  <text x="430" y="132" text-anchor="middle" font-size="8" fill="var(--text-1)">scaleset-listener.env (0600, token)</text>
+  <text x="430" y="132" text-anchor="middle" font-size="8" fill="var(--text-1)">&lt;type&gt;.env (0600, token)</text>
 
   <!-- systemd -->
   <rect x="580" y="60" width="260" height="120" rx="6" fill="var(--github-fill)" stroke="var(--github)" stroke-width="1.2"/>
   <text x="710" y="80" text-anchor="middle" font-size="9" font-weight="500" fill="var(--github)">systemd</text>
   <rect x="595" y="90" width="230" height="22" rx="3" fill="var(--surface)" stroke="var(--github-soft)" stroke-width="1"/>
-  <text x="710" y="106" text-anchor="middle" font-size="8" fill="var(--text-1)">scaleset-listener.service (enable+start)</text>
+  <text x="710" y="106" text-anchor="middle" font-size="8" fill="var(--text-1)">scaleset-listener@.service (shared template)</text>
   <rect x="595" y="116" width="230" height="22" rx="3" fill="var(--surface)" stroke="var(--github-soft)" stroke-width="1"/>
   <text x="710" y="132" text-anchor="middle" font-size="8" fill="var(--text-1)">User=ci-runner (unprivileged)</text>
   <rect x="595" y="142" width="230" height="22" rx="3" fill="var(--surface)" stroke="var(--github-soft)" stroke-width="1"/>
-  <text x="710" y="158" text-anchor="middle" font-size="8" fill="var(--text-1)">EnvironmentFile=...env (token source)</text>
+  <text x="710" y="158" text-anchor="middle" font-size="8" fill="var(--text-1)">EnvironmentFile=&lt;etc&gt;/&lt;type&gt;.env</text>
 
   <!-- RUNNER_HOME -->
   <rect x="40" y="200" width="800" height="100" rx="6" fill="var(--container-fill)" stroke="var(--container)" stroke-width="1.2"/>
@@ -1263,8 +1263,8 @@ td {
   <rect x="450" y="296" width="400" height="80" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>
   <text x="470" y="316" font-size="9" font-weight="500" fill="var(--text-2)">deploy/</text>
   <text x="490" y="334" font-size="8" fill="var(--text-1)">runner-types.sample.yaml ... runner-type config template</text>
-  <text x="490" y="350" font-size="8" fill="var(--text-1)">scaleset-listener.env.sample . env file template</text>
-  <text x="490" y="366" font-size="8" fill="var(--text-1)">scaleset-listener.service .. systemd unit</text>
+  <text x="490" y="350" font-size="8" fill="var(--text-1)">scaleset-listener.env.sample . sample for &lt;etc&gt;/&lt;type&gt;.env</text>
+  <text x="490" y="366" font-size="8" fill="var(--text-1)">scaleset-listener@.service .. shared systemd template</text>
 
   <!-- doc/ -->
   <rect x="30" y="446" width="400" height="100" rx="6" fill="var(--surface)" stroke="var(--border)" stroke-width="1"/>

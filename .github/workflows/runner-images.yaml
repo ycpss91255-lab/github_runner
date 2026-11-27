@@ -23,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       runner_version:
-        description: 'actions/runner version to bake in (e.g. 2.334.0). Empty = what resolve_runner_version resolves (the latest release).'
+        description: 'actions/runner version to bake in (e.g. 2.338.2). Empty = what resolve_runner_version resolves (the latest release).'
         required: false
         default: ''
   push:
