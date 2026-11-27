@@ -311,6 +311,59 @@ listener_env_file_ready() {
   [[ "$(stat -c '%a' "${file}" 2>/dev/null)" == 600 ]]
 }
 
+# Read a single-line value without executing the EnvironmentFile as shell code.
+listener_env_value() {
+  local file=$1 key=$2 value
+  value=$(sed -nE "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\\1/p" "${file}" | tail -n 1)
+  case ${value} in
+    \"*\"|\'*\') value=${value:1:-1} ;;
+  esac
+  printf '%s\n' "${value}"
+}
+
+# Emit only settings missing from the installed file, including when a
+# setting is explicitly present with an empty value.
+listener_missing_env_defaults() {
+  local file=$1 config_url=$2 types_config=$3 type_name=$4
+  local prefix=${LISTENER_PREFIX:-/opt/github-runner-listener}
+  local target owner assignment
+  target=$(listener_env_value "${file}" GITHUB_CONFIG_URL)
+  target=${target:-${config_url}}
+  target=${target#*://}
+  owner=
+  if [[ ${target} == */* ]]; then
+    target=${target#*/}
+    if [[ ${target,,} == enterprises/* ]]; then
+      target=${target#*/}
+    fi
+    owner=${target%%/*}
+  fi
+  for assignment in \
+    "GITHUB_CONFIG_URL=${config_url}" \
+    "RUNNER_TYPES_CONFIG=${types_config}" \
+    "RUNNER_TYPE=${type_name}" \
+    "SCALE_SET_OWNER=${owner}" \
+    "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" \
+    "REAP_SCRIPT=${prefix}/listener/reap.sh" \
+    "HOST_PROBE_CMD=${prefix}/listener/host-probe.sh"; do
+    if ! grep -qE "^[[:space:]]*${assignment%%=*}[[:space:]]*=" "${file}"; then
+      printf '%s\n' "${assignment}"
+    fi
+  done
+}
+
+listener_backfill_env_file() {
+  local file=$1 missing
+  missing=$(listener_missing_env_defaults "$@")
+  if [[ -n ${missing} ]]; then
+    # The leading newline also handles legacy files without a final newline.
+    printf '\n%s\n' "${missing}" >> "${file}"
+    echo "  environment file: backfilled missing keys in ${file} (0600)"
+  else
+    echo "  environment file: ${file} already in place (0600), skipped"
+  fi
+}
+
 # Write the unit's EnvironmentFile, containing the token.
 #
 # The file is CREATED at 0600 and only then written to, so its contents never
@@ -319,7 +372,7 @@ listener_env_file_ready() {
 # needs. Everything is written with shell redirection and the printf builtin, so
 # the token is never an argument to an exec'd process.
 listener_write_env_file() {
-  local file=$1 config_url=$2 types_config=$3 type_name=$4
+  local file=$1 config_url=$2 types_config=$3 type_name=$4 defaults
   if [[ -z ${LISTENER_TOKEN:-} ]]; then
     echo "FAIL: no token was provided; refusing to write ${file}" >&2
     return 1
@@ -330,11 +383,10 @@ listener_write_env_file() {
     printf '# Written by script/deploy-listener.sh. Mode 0600, root-only.\n'
     printf '# The listener reads the token from this environment; it is never\n'
     printf '# passed on a command line and never logged.\n'
-    printf 'GITHUB_CONFIG_URL=%s\n' "${config_url}"
     printf 'GITHUB_TOKEN=%s\n' "${LISTENER_TOKEN}"
-    printf 'RUNNER_TYPES_CONFIG=%s\n' "${types_config}"
-    printf 'RUNNER_TYPE=%s\n' "${type_name}"
   } >> "${file}"
+  defaults=$(listener_missing_env_defaults "${file}" "${config_url}" "${types_config}" "${type_name}")
+  printf '%s\n' "${defaults}" >> "${file}"
   echo "  environment file: wrote ${file} (0600)"
 }
 

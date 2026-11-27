@@ -26,11 +26,12 @@ type fakeSession struct {
 	cancel         context.CancelFunc                // if set, called when messages drain to end the loop via ctx
 	polledAfter    []int                             // lastMessageID passed to each GetMessage
 	protocol       []string                          // acquire and ack calls in order
-	closeCtxErr    error                             // context state when Close was called
-	reportedCap    []int                             // maxCapacity passed to each GetMessage
-	deletedIDs     []int                             // messageIDs acked via DeleteMessage
-	acquiredReqIDs [][]int64                         // requestIDs passed to each AcquireJobs
-	closed         bool                              // Close was called (teardown)
+	closeErr       error
+	closeCtxErr    error     // context state when Close was called
+	reportedCap    []int     // maxCapacity passed to each GetMessage
+	deletedIDs     []int     // messageIDs acked via DeleteMessage
+	acquiredReqIDs [][]int64 // requestIDs passed to each AcquireJobs
+	closed         bool      // Close was called (teardown)
 }
 
 func (f *fakeSession) GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error) {
@@ -84,7 +85,7 @@ func (f *fakeSession) Session() scaleset.RunnerScaleSetSession {
 func (f *fakeSession) Close(ctx context.Context) error {
 	f.closed = true
 	f.closeCtxErr = ctx.Err()
-	return nil
+	return f.closeErr
 }
 
 // recordingMinter is a mock of the JIT minter seam (the production
@@ -226,7 +227,7 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 		Runtime: "nvidia",
 	})
 
-	if err := l.Listen(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if err := l.Listen(ctx); err != nil {
 		t.Fatalf("Listen returned unexpected error: %v", err)
 	}
 	if len(prov.jobs) != 1 {
@@ -319,11 +320,8 @@ func TestProcessedMessageIsAcked(t *testing.T) {
 	}
 }
 
-// The message must be acked (DeleteMessage) once its jobs are acquired/
-// dispatched, NOT after the container exits -- otherwise a long-running job
-// would leave the message unacked for its whole duration. With a provisioner
-// that blocks (a slow job), the ack must still land.
-func TestMessageAckedOnAcquireNotAfterJobFinishes(t *testing.T) {
+// The envelope must already be acknowledged while the assigned job is running.
+func TestMessageAckedBeforeJobFinishes(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	sess := &fakeSession{
@@ -407,7 +405,7 @@ func TestProvisionerErrorIsIsolatedLoopContinues(t *testing.T) {
 	if len(loggedJobErrs) != 1 || !errors.Is(loggedJobErrs[0], wantErr) {
 		t.Errorf("expected the per-job failure to be logged once, got %v", loggedJobErrs)
 	}
-	// Both messages acked despite the failure (ack-on-acquire, #99).
+	// Both envelopes are acknowledged despite the provisioning failure.
 	if got := sess.ackedIDs(); len(got) != 2 {
 		t.Errorf("expected both messages acked, got %v", got)
 	}
@@ -431,6 +429,46 @@ func TestContextCancellationEndsLoopAndTearsDownSession(t *testing.T) {
 	}
 	if sess.closeCtxErr != nil {
 		t.Errorf("Close received a cancelled context: %v", sess.closeCtxErr)
+	}
+}
+
+func TestCloseErrorSurfacesOnShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	wantErr := errors.New("close failed")
+	sess := &fakeSession{closeErr: wantErr}
+	l := New(sess, &recordingMinter{}, &recordingProvisioner{}, Config{})
+
+	if err := l.Listen(ctx); !errors.Is(err, wantErr) {
+		t.Fatalf("Listen returned %v, want %v", err, wantErr)
+	}
+}
+
+func TestAcquireFiltersInvalidAvailableIDs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	invalid := []*scaleset.JobAvailable{
+		nil,
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 0}},
+		{JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: -1}},
+	}
+	mixed := append(slices.Clone(invalid), &scaleset.JobAvailable{
+		JobMessageBase: scaleset.JobMessageBase{RunnerRequestID: 42},
+	})
+	sess := &fakeSession{
+		messages: []*scaleset.RunnerScaleSetMessage{
+			{MessageID: 1, JobAvailableMessages: invalid},
+			{MessageID: 2, JobAvailableMessages: mixed},
+		},
+		cancel: cancel,
+	}
+	l := New(sess, &recordingMinter{}, &recordingProvisioner{}, Config{})
+
+	if err := l.Listen(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(sess.acquiredReqIDs) != 1 || !slices.Equal(sess.acquiredReqIDs[0], []int64{42}) {
+		t.Errorf("AcquireJobs batches = %v, want [[42]]", sess.acquiredReqIDs)
 	}
 }
 

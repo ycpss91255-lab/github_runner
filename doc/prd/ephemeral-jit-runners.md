@@ -63,8 +63,8 @@ cross-job residue and secret carryover by construction.
    run, so that GitHub does not queue jobs against headroom that does not exist.
 10. As an operator, I want a single failed job to be logged and skipped, so that
     one bad job never tears down the whole listener session.
-11. As an operator, I want messages acknowledged when a job is acquired, so that
-    long jobs do not leave messages unacked and risk redelivery.
+11. As an operator, I want messages acknowledged before available jobs are
+    acquired, so that long jobs do not leave messages unacked and risk redelivery.
 12. As an operator, I want orphaned containers and stale temp dirs reaped, so
     that a crash mid-job does not leak resources and break "zero residue".
 13. As an operator, I want each job container bounded by a max lifetime, so that
@@ -118,10 +118,10 @@ cross-job residue and secret carryover by construction.
   scale-set client requires it — the listener "brain". Everything else stays in
   the repo's native bash, reusing existing seams (`_gh`, `RUNNER_HOME`/SEC-3,
   `schedule-cleanup`). The boundary is a single shell-out: the Go listener, per
-  acquired job, invokes the bash container provisioner with explicit parameters.
+  assigned job, invokes the bash container provisioner with explicit parameters.
   - **Go modules**: JIT Minter (over the client's `GenerateJitRunnerConfig`);
-    Listener loop (injectable `Session`, ack-on-acquire, per-job failure
-    isolation); Concurrency controller + capacity detector (bounded pool,
+    Listener loop (injectable `Session`, ack before availability acquisition,
+    per-job failure isolation); Concurrency controller + capacity detector (bounded pool,
     locally-derived capacity, hardware auto-sizing); Runner-type config loader
     (authoritative parser; passes per-job params to bash).
   - **Bash modules**: Container provisioner (hardened single-use container,

@@ -11,6 +11,7 @@ package listener
 
 import (
 	"context"
+	"errors"
 	"log"
 	"runtime"
 	"strings"
@@ -53,8 +54,7 @@ type Session interface {
 	// listener's current spare capacity (maxCapacity) so GitHub never assigns
 	// more jobs than we can provision.
 	GetMessage(ctx context.Context, lastMessageID int, maxCapacity int) (*scaleset.RunnerScaleSetMessage, error)
-	// AcquireJobs claims the given request IDs for this session (the JIT
-	// configs for those jobs become ours to run).
+	// AcquireJobs claims available request IDs for this session.
 	AcquireJobs(ctx context.Context, requestIDs []int64) ([]int64, error)
 	// DeleteMessage acks a processed message so the long-poll does not
 	// redeliver it.
@@ -77,7 +77,7 @@ var _ Session = (*scaleset.MessageSessionClient)(nil)
 // runner_container_run shell seam consumes.
 type ProvisionRequest struct {
 	JobID            string   // GitHub job id (assigned message JobID)
-	RequestID        int64    // scale-set runner request id (for AcquireJobs)
+	RequestID        int64    // scale-set runner request ID from the assignment
 	Labels           []string // the job's requested labels
 	EncodedJITConfig string   // single-use server-minted JIT config for this job
 	Image            string   // container image to run the job in
@@ -288,34 +288,20 @@ func resolveBound(cfg Config) int {
 	return defaultPoolBound
 }
 
-// Listen runs the long-poll loop until the session drains or the context is
-// done, ALWAYS tearing the session down on exit. Each iteration:
-//
-//  1. GetMessage, reporting LOCALLY-derived spare capacity (pool bound minus
-//     the local in-flight count, #102) so reported headroom matches what THIS
-//     host can actually run -- not the server's TotalAssignedJobs -- and GitHub
-//     never assigns more than the pool can provision.
-//  2. For every ASSIGNED job in the message, acquire it and mint its single-use
-//     JIT config -- claiming the work that is ours to run.
-//  3. Ack the message (DeleteMessage) so it is not redelivered. The ack lands
-//     once the jobs are acquired/dispatched, BEFORE the (potentially long)
-//     container run, so a slow job never leaves its message unacked.
-//  4. Shell out to the per-job container provisioner for each acquired job --
-//     the fresh-container isolation the scale set client does not provide. A
-//     job's failure is an isolated per-job outcome (logged, loop continues).
-//
-// Only a genuine transport/session error (a non-context GetMessage / AcquireJobs
-// / DeleteMessage failure) returns from the loop; the session is ALWAYS torn
-// down on exit. Context cancellation ends the loop cleanly.
+// Listen polls for messages with locally derived spare capacity. It acknowledges
+// each envelope before acquiring its available jobs in one batch. Each assigned
+// job gets its own JIT config and is dispatched to the bounded worker pool.
+// Provisioning failures are reported per job. Listener cancellation ends polling
+// cleanly, then Listen drains workers and closes the session.
 func (l *Listener) Listen(ctx context.Context) (err error) {
-	// Teardown is unconditional: clean exit or mid-job failure, the session
-	// must be closed so it does not linger server-side. The DRAIN (#101) runs
-	// FIRST: we wait for every dispatched in-flight job to finish before closing
-	// the session, so a clean shutdown never tears the session down (or returns)
-	// while a container is still running.
 	defer func() {
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			err = nil
+		}
 		l.wg.Wait()
-		closeErr := l.session.Close(ctx)
+		closeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		defer cancel()
+		closeErr := l.session.Close(closeCtx)
 		if err == nil {
 			err = closeErr
 		}
@@ -357,21 +343,16 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 			continue
 		}
 
-		// Acquire + mint every assigned job FIRST, so the message can be acked
-		// before we run any container.
-		reqs, aerr := l.acquire(ctx, msg)
-		if aerr != nil {
-			return aerr
+		if err := l.session.DeleteMessage(ctx, msg.MessageID); err != nil {
+			return err
 		}
-
-		// Ack the message now that its jobs are acquired/dispatched -- before
-		// the (potentially long) provisioning below -- so a slow job never
-		// leaves the message unacked for its whole duration.
-		if msg.MessageID > 0 {
-			if derr := l.session.DeleteMessage(ctx, msg.MessageID); derr != nil {
-				return derr
-			}
-			lastMessageID = msg.MessageID
+		lastMessageID = msg.MessageID
+		if err := l.acquire(ctx, msg.JobAvailableMessages); err != nil {
+			return err
+		}
+		reqs, err := l.mintAssignments(ctx, msg.JobAssignedMessages)
+		if err != nil {
+			return err
 		}
 
 		// Provisioning is per-job isolated: a failed job is logged and the loop
@@ -380,19 +361,28 @@ func (l *Listener) Listen(ctx context.Context) (err error) {
 	}
 }
 
-// acquire claims every ASSIGNED job in the message and mints its single-use JIT
-// config, returning a ready-to-run ProvisionRequest per job. Only assigned jobs
-// are ours to run; available-but-unassigned jobs are left for the scale set to
-// assign, so we never over-provision on availability.
-func (l *Listener) acquire(ctx context.Context, msg *scaleset.RunnerScaleSetMessage) ([]ProvisionRequest, error) {
+// acquire claims one batch of valid request IDs from the acknowledged
+// envelope's availability events.
+func (l *Listener) acquire(ctx context.Context, jobs []*scaleset.JobAvailable) error {
+	var requestIDs []int64
+	for _, job := range jobs {
+		if job != nil && job.RunnerRequestID > 0 {
+			requestIDs = append(requestIDs, job.RunnerRequestID)
+		}
+	}
+	if len(requestIDs) == 0 {
+		return nil
+	}
+	_, err := l.session.AcquireJobs(ctx, requestIDs)
+	return err
+}
+
+// mintAssignments creates a provisioning request for each assigned job.
+func (l *Listener) mintAssignments(ctx context.Context, jobs []*scaleset.JobAssigned) ([]ProvisionRequest, error) {
 	var reqs []ProvisionRequest
-	for _, ja := range msg.JobAssignedMessages {
+	for _, ja := range jobs {
 		if ja == nil {
 			continue
-		}
-		// Claim the job so its JIT config is ours to run.
-		if _, err := l.session.AcquireJobs(ctx, []int64{ja.RunnerRequestID}); err != nil {
-			return nil, err
 		}
 		// Mint the single-use JIT config for this job via the Go client
 		// (ADR-0001: minting lives on the Go side of the boundary).
@@ -414,7 +404,7 @@ func (l *Listener) acquire(ctx context.Context, msg *scaleset.RunnerScaleSetMess
 	return reqs, nil
 }
 
-// provision dispatches the per-job container for each acquired job into the
+// provision dispatches the per-job container for each assigned job into the
 // bounded worker pool (#101): each job runs in its own goroutine, gated by the
 // counting semaphore so no more than `bound` run at once. Dispatch BLOCKS only
 // while every slot is taken (back-pressure) -- otherwise it returns immediately

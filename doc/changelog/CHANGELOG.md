@@ -92,6 +92,19 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The scale-set listener acquires available jobs after acknowledging the envelope.**
+  Acquisition batches valid availability request IDs. Assignment events mint
+  and provision by job ID, including assignments with a zero request ID.
+  On SIGTERM the listener drains its workers, closes the session with a fresh
+  bounded context, and exits successfully when cleanup succeeds.
+- **Listener deployment fills in the scale-set owner and installed script paths.**
+  Reruns backfill the protected environment file while preserving existing
+  settings and reusing the stored token.
+- **Job provisioning writes the default history ledger under the runner home.**
+  The provisioner resolves the runner home before loading the history library,
+  so the default ledger is `RUNNER_HOME/history/ledger.tsv`.
+
+
 - **Listener jobs no longer fail with `./run.sh: not found`.** The per-job
   container bound the fresh, empty per-job host dir over `/runner` and ran
   `./run.sh` from there, so the runner the image ships at `/home/runner` was

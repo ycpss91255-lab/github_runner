@@ -56,7 +56,8 @@ Usage: $(basename "$0") [options]
 Stand a scale-set listener up on this machine in one command: the GitHub side
 (create the runner type's scale set if it is not there yet) and the local side
 (build, install, service user, environment file, systemd unit, enable, start,
-verify). Idempotent -- re-running skips whatever is already in place.
+verify). Reruns backfill missing environment settings and preserve existing
+values.
 
 The runner-type config is read through the scale-set admin tool, which is taken
 from this checkout's build output, else from PATH, and BUILT (just build-admin)
@@ -272,12 +273,15 @@ main() {
   # and fail every first-time deploy on a host that had not already exported
   # GITHUB_TOKEN. One prompt, asked up front, serves both.
   #
-  # It is only asked for when it is actually needed: a --skip-github re-run
-  # whose environment file is already in place needs no token at all.
-  local need_token=0
-  (( SKIP_GITHUB )) || need_token=1
-  listener_env_file_ready "${LISTENER_ENV_FILE}" || need_token=1
-  if (( need_token )) && [[ -z ${LISTENER_TOKEN:-} ]]; then
+  # Reuse the installed credential for the GitHub half on a rerun.
+  if [[ -f ${LISTENER_ENV_FILE} ]]; then
+    listener_env_file_ready "${LISTENER_ENV_FILE}" || chmod 0600 "${LISTENER_ENV_FILE}"
+    if (( ! SKIP_GITHUB )); then
+      LISTENER_TOKEN=${LISTENER_TOKEN:-${GITHUB_TOKEN:-}}
+      LISTENER_TOKEN=${LISTENER_TOKEN:-$(listener_env_value "${LISTENER_ENV_FILE}" GITHUB_TOKEN)}
+      [[ -n ${LISTENER_TOKEN} ]] || { echo "FAIL: no token in environment or ${LISTENER_ENV_FILE}" >&2; exit 1; }
+    fi
+  elif [[ -z ${LISTENER_TOKEN:-} ]]; then
     if [[ -n ${GITHUB_TOKEN:-} ]]; then
       # Already in the environment (an unattended run); do not ask again.
       LISTENER_TOKEN="${GITHUB_TOKEN}"
@@ -323,7 +327,8 @@ main() {
   listener_ensure_work_root "${SERVICE_USER}"
 
   if listener_env_file_ready "${LISTENER_ENV_FILE}"; then
-    echo "  environment file: ${LISTENER_ENV_FILE} already in place (0600), skipped"
+    listener_backfill_env_file "${LISTENER_ENV_FILE}" "${CONFIG_URL}" \
+      "${TYPES_CONFIG}" "${TYPE_NAME}"
   else
     listener_write_env_file "${LISTENER_ENV_FILE}" "${CONFIG_URL}" \
       "${TYPES_CONFIG}" "${TYPE_NAME}"

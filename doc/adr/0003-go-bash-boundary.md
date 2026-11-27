@@ -29,7 +29,7 @@ and make the Go↔bash boundary a single clean shell-out.**
   runner-type config parse.
 - **Bash** does **everything else**, reusing the existing seams: the per-job
   container provisioner, the reaper, the build seam, and the job-history store.
-- **The boundary is one shell-out**: per acquired job, the Go listener invokes
+- **The boundary is one shell-out**: per assigned job, the Go listener invokes
   the bash container provisioner with **explicit parameters** (image, devices,
   hardening profile, and the JIT config via a file, not argv). Go does not
   reimplement container/host/cleanup logic; bash does not talk to the scale-set

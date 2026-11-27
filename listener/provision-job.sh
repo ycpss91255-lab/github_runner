@@ -36,10 +36,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=SCRIPTDIR/../lib/runner-container.sh
 source "${SCRIPT_DIR}/../lib/runner-container.sh"
-# Job-history store (ADR-0002): the capture-before-teardown hook lives here, so
-# forensics are captured out-of-band BEFORE the container/temp dir is removed.
-# shellcheck source=SCRIPTDIR/../lib/runner-history.sh
-source "${SCRIPT_DIR}/../lib/runner-history.sh"
 
 usage() { echo "usage: provision-job.sh <job-id> <jit-config-file> <image>" >&2; }
 
@@ -71,6 +67,10 @@ encoded=$(cat -- "${jit_file}")
 # halves can never diverge (#148). RUNNER_HOME is still materialised here for the
 # history store (lib/runner-history.sh) which also anchors under it.
 : "${RUNNER_HOME:=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)/runners}"
+# Job-history store (ADR-0002): the capture-before-teardown hook lives here, so
+# forensics are captured out-of-band BEFORE the container/temp dir is removed.
+# shellcheck source=SCRIPTDIR/../lib/runner-history.sh
+source "${SCRIPT_DIR}/../lib/runner-history.sh"
 work_root="$(runner_work_root)"
 # Create the work root so mktemp -d can land the per-job dir under it on a fresh
 # host (RUNNER_HOME/work may not exist yet).

@@ -130,22 +130,29 @@ docker run --rm -e GITHUB_CONFIG_URL -e GITHUB_TOKEN -e SCALE_SET_NAME \
 
 | Env | Meaning |
 | --- | --- |
-| `GITHUB_CONFIG_URL` | `https://github.com/<org>` (required) |
+| `GITHUB_CONFIG_URL` | GitHub organization or repository URL (required) |
+| `SCALE_SET_OWNER` | owner sent when creating the session (deploy derives it from the target URL) |
 | `GITHUB_TOKEN` | token with scale-set admin scope (required) |
 | `SCALE_SET_NAME` | the scale set to connect to, **by name** (required). An identifier, not the runs-on target -- see above |
 | `RUNNER_IMAGE` | per-job container image (default `ghcr.io/actions/actions-runner:latest`) |
 | `AUTO_SIZE_DEVICES` | when set, size the pool to the detected device count (#103) instead of reactive live-admission |
 | `DEVICE_DETECT_CMD` | device-enumeration command for auto-sizing (default `nvidia-smi`, one device per output line) |
 | `HOST_PROBE_CMD` | host reader for reactive live-admission (default `host-probe.sh`; ADR-0005, #163) |
-| `PROVISION_SCRIPT` | path to `provision-job.sh` (default sibling) |
-| `REAP_SCRIPT` | path to `reap.sh`, the orphan-sweep entrypoint (default sibling) |
+| `PROVISION_SCRIPT` | path to `provision-job.sh` (default command on `PATH`) |
+| `REAP_SCRIPT` | path to `reap.sh`, the orphan-sweep entrypoint (default command on `PATH`) |
+
+Deployment sets `HOST_PROBE_CMD`, `PROVISION_SCRIPT`, and `REAP_SCRIPT` to
+their installed paths under `${LISTENER_PREFIX}/listener`. Reruns backfill missing
+settings in the mode-0600 environment file and preserve existing values.
 
 The bash seams read a few more knobs at provision/reap time:
 `RUNNER_WORK_ROOT` (parent of the per-job temp dir, default `${RUNNER_HOME}/work`
 — #130; reap.sh prunes the **same** root, #148),
 `RUNNER_JOB_MAX_LIFETIME` (per-job watchdog ceiling in seconds, default 6h, 0
 disables, #107), and `RUNNER_MANAGED_BY` (the `managed-by` label value the
-reaper keys on, #104/#105).
+reaper keys on, #104/#105). The history ledger defaults to
+`${RUNNER_HOME}/history/ledger.tsv` and honors `RUNNER_HISTORY_DIR` and
+`RUNNER_HISTORY_LEDGER` overrides.
 
 ### Per-job container hardening (#114/#115/#116/#117)
 
@@ -205,7 +212,10 @@ Pin the builder images by digest in production via `RUNNER_KANIKO_IMAGE` /
 
 ## Concurrency, capacity & lifecycle
 
-- **Bounded worker pool (#101):** each acquired job provisions in its own
+- The listener acknowledges each message envelope before batching valid
+  request IDs from its availability events. Assignment events mint JIT configs
+  by job ID and dispatch jobs to the worker pool.
+- **Bounded worker pool (#101):** each assigned job provisions in its own
   goroutine gated by a semaphore sized to the pool bound, so the loop keeps
   long-polling; a clean shutdown drains in-flight jobs before teardown.
 - **Reactive live-admission (ADR-0005, #163):** by default the listener admits

@@ -172,11 +172,17 @@ sudo install -d -m 0755 /etc/github-runner-listener
 sudo install -m 0600 deploy/scaleset-listener.env.sample \
   /etc/github-runner-listener/scaleset-listener.env
 sudo "${EDITOR:-vi}" /etc/github-runner-listener/scaleset-listener.env
-# Fill in GITHUB_CONFIG_URL, GITHUB_TOKEN, SCALE_SET_NAME.
+# Fill in GITHUB_CONFIG_URL, GITHUB_TOKEN, SCALE_SET_OWNER, and SCALE_SET_NAME.
 # SCALE_SET_NAME names a scale set; it is NOT what workflows target (section 0).
 # Verify it is 0600 and root-owned:
 sudo stat -c '%a %U' /etc/github-runner-listener/scaleset-listener.env   # -> 600 root
 ```
+
+Set `SCALE_SET_OWNER` to the owner in the target URL. Set `PROVISION_SCRIPT`,
+`REAP_SCRIPT`, and `HOST_PROBE_CMD` to the installed paths under
+`${LISTENER_PREFIX}/listener` when using a custom prefix. The deploy script sets
+these values and backfills missing keys on reruns while preserving existing
+values and keeping the file at mode 0600.
 
 ## 3a. (Optional) Register a runner type via the per-type config (#110/#112/#113)
 
