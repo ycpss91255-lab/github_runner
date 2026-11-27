@@ -77,8 +77,9 @@ identical -- `docker` group membership is root-equivalent either way.
 
 It covers both halves and says which is which: the **GitHub side** (create the
 runner type's scale set, if it is not already there -- section 3c) and the
-**local side** (build and install, service user, 0600 environment file, systemd
-unit, enable, start -- sections 1, 2, 3, 4). It then verifies the listener
+**local side** (build and install, service user and its engine access, the
+writable runner state tree, 0600 environment file, systemd unit, enable, start
+-- sections 1, 2, 2a, 3, 4). It then verifies the listener
 actually connected and is reporting capacity, and prints the exact `runs-on:`
 line for your first job.
 
@@ -132,12 +133,33 @@ This lays down a self-contained tree the listener shells out against:
 ## 2. Create the unprivileged service user
 
 The unit runs as a dedicated non-root user (acceptance: never root). It must be
-able to reach the rootless container engine (rootless podman session, or
-membership in the `docker` group):
+able to reach the container engine the provisioner uses. `deploy-listener.sh`
+does both: it creates the user, and on a rootful docker host (no `podman` on
+`PATH`, a `docker` group present) it adds the user to the `docker` group,
+skipping a user that is already a member. Rootless podman needs no group, and a
+missing `docker` group is reported rather than created. By hand:
 
 ```sh
 sudo useradd --system --create-home --shell /usr/sbin/nologin ci-runner
-# If using rootful docker, also: sudo usermod -aG docker ci-runner
+# Rootful docker only:
+sudo usermod -aG docker ci-runner
+```
+
+`docker` group membership is root-equivalent on the host; job code never gets
+the socket (see `listener/README.md`), only the listener does.
+
+## 2a. Create the writable runner state tree
+
+The unit runs under `ProtectSystem=strict`, which makes `/opt` read-only, and
+grants back exactly `ReadWritePaths=/opt/github-runner-listener/runners`
+(`RUNNER_HOME`): the per-job dirs go under its `work/` root and the job-history
+ledger under `history/`. The directory has to exist and belong to the service
+user; systemd refuses to start the unit when a `ReadWritePaths` entry is
+missing. `deploy-listener.sh` creates it. By hand:
+
+```sh
+sudo install -d -m 0750 -o ci-runner -g ci-runner \
+  /opt/github-runner-listener/runners /opt/github-runner-listener/runners/work
 ```
 
 ## 3. Provide the token via an EnvironmentFile (mode 0600) (#109)

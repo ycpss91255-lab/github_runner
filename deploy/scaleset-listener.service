@@ -14,9 +14,10 @@ After=podman.socket
 Type=simple
 
 # --- Non-privileged user (acceptance: runs as non-root) --------------------
-# A dedicated, unprivileged CI user owns the process. Rootless podman is the
-# intended engine; this user must be able to reach its container socket (e.g.
-# via membership in the docker group, or a rootless podman user session).
+# A dedicated, unprivileged CI user owns the process. It must be able to reach
+# the container engine: script/deploy-listener.sh adds it to the docker group on
+# a rootful docker host (supplementary groups come from /etc/group, picked up on
+# the restart the deploy does); rootless podman needs no group.
 User=ci-runner
 Group=ci-runner
 
@@ -52,16 +53,15 @@ ProtectControlGroups=true
 ProtectKernelModules=true
 ProtectKernelTunables=true
 RestrictSUIDSGID=true
-# The per-job temp dirs land under RUNNER_WORK_ROOT, which DEFAULTS to
-# ${RUNNER_HOME}/work (#130/#148) -- i.e. <repo_root>/runners/work, here
-# /opt/github-runner-listener/runners/work -- NOT /tmp. Both provision-job.sh
-# (which creates the per-job runner dir there) and reap.sh (which prunes leaked
-# dirs from it) resolve this SAME root via runner_work_root, so they never
-# diverge. ProtectSystem=strict makes that path READ-ONLY by default, so the
-# provisioner/reaper cannot create+prune there unless it is granted below. Add
-# the resolved work root (or RUNNER_HOME, or RUNNER_WORK_ROOT if you point it
-# elsewhere) to ReadWritePaths.
-# ReadWritePaths=/opt/github-runner-listener/runners/work
+# The listener writes RUNNER_HOME, which provision-job.sh resolves to
+# /opt/github-runner-listener/runners: per-job dirs under its work/ root
+# (runner_work_root, shared with reap.sh, #130/#148) and the job-history ledger
+# under its history/ dir. ProtectSystem=strict makes all of /opt read-only, so
+# that tree is granted here. script/deploy-listener.sh creates it owned by
+# ci-runner (systemd refuses to start the unit if it is missing, rather than
+# running with a read-only work root). If you point RUNNER_WORK_ROOT or
+# RUNNER_HISTORY_DIR elsewhere, add that path too.
+ReadWritePaths=/opt/github-runner-listener/runners
 
 [Install]
 WantedBy=multi-user.target
