@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
@@ -20,6 +21,7 @@ import (
 // client satisfies the same Session interface (proven by the compile-time
 // assertion in listener.go), so the listener cannot tell them apart.
 type fakeSession struct {
+	metadata       scaleset.RunnerScaleSetSession
 	mu             sync.Mutex
 	messages       []*scaleset.RunnerScaleSetMessage // scripted, drained front-to-back
 	beforePoll     func(lastMessageID int)
@@ -98,7 +100,7 @@ func (f *fakeSession) ackedIDs() []int {
 }
 
 func (f *fakeSession) Session() scaleset.RunnerScaleSetSession {
-	return scaleset.RunnerScaleSetSession{}
+	return f.metadata
 }
 
 func (f *fakeSession) Close(ctx context.Context) error {
@@ -280,43 +282,6 @@ func TestAssignedJobTriggersProvisioner(t *testing.T) {
 	// provisioner can add --runtime to the container run.
 	if got.Runtime != "nvidia" {
 		t.Errorf("provisioner got wrong runtime: %q", got.Runtime)
-	}
-}
-
-// Reported capacity is LOCALLY derived (#102): the first poll, with nothing
-// in-flight, offers the full pool bound -- and crucially it does NOT track the
-// server's TotalAssignedJobs (a large statistic must not shrink the offer when
-// nothing is actually running locally).
-func TestInitialCapacityIsFullPoolBound(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sess := &fakeSession{
-		messages: []*scaleset.RunnerScaleSetMessage{
-			// TotalAssignedJobs=3 is deliberately non-zero: under the old
-			// server-derived capacity this poll would have dropped to 5-3=2.
-			msgWithAssigned(1, 3, assigned(1, "j1")),
-		},
-		cancel: cancel,
-	}
-	prov := &recordingProvisioner{}
-	l := New(sess, &recordingMinter{config: "jit"}, prov, Config{Image: "img", MaxRunners: 5})
-
-	_ = l.Listen(ctx)
-
-	if len(sess.reportedCap) < 1 {
-		t.Fatalf("expected at least 1 GetMessage call, got %d", len(sess.reportedCap))
-	}
-	// First poll: nothing in-flight, capacity is the full pool bound.
-	if sess.reportedCap[0] != 5 {
-		t.Errorf("initial capacity: got %d want 5 (pool bound)", sess.reportedCap[0])
-	}
-	// Every reported capacity must stay within [0, bound] and never be derived
-	// from the server's TotalAssignedJobs (the j1 job finishes promptly via the
-	// non-blocking recordingProvisioner, so headroom returns to the full bound).
-	for i, c := range sess.reportedCap {
-		if c < 0 || c > 5 {
-			t.Errorf("reportedCap[%d]=%d outside [0,5]", i, c)
-		}
 	}
 }
 
@@ -700,87 +665,167 @@ func TestZeroDeviceCountFallsBackToDefault(t *testing.T) {
 	}
 }
 
-// --- #102 locally-derived capacity --------------------------------------------
-
-// Capacity must be derived from the LOCAL in-flight count (pool bound minus
-// running jobs), NOT the server's TotalAssignedJobs. With bound=3 and one job
-// held mid-flight, the next poll must report 2 (3-1); once the job finishes the
-// poll reports the full 3 again -- the reported value tracks local occupancy.
-func TestCapacityIsPoolBoundMinusLocalInFlight(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	// The server statistic is deliberately a large, unrelated number: if the
-	// listener still derived capacity from TotalAssignedJobs it would report
-	// bound-99 (clamped to 0), not bound-inflight.
-	sess := &fakeSession{
-		messages: []*scaleset.RunnerScaleSetMessage{
-			msgWithAssigned(1, 99, assigned(1, "held")),
+func TestGetMessageAdvertisesResolvedBound(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want int
+		jobs int
+	}{
+		{name: "bound one", cfg: Config{MaxRunners: 1}, want: 1, jobs: 1},
+		{name: "bound three", cfg: Config{MaxRunners: 3}, want: 3, jobs: 2},
+		{
+			name: "reactive",
+			cfg: Config{HostProbe: stubProbe{res: HostResources{
+				Free: map[Resource]float64{ResourceCPU: 0.30, ResourceMem: 1.0}, Footprint: 0.125,
+			}}, Reserve: 10},
+			want: runtime.NumCPU(),
+			jobs: 1,
 		},
-		cancel: cancel,
-	}
-	probe := &concurrencyProbe{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-	}
-	l := New(sess, &recordingMinter{config: "jit"}, probe, Config{Image: "img", MaxRunners: 3})
-
-	done := make(chan struct{})
-	go func() { _ = l.Listen(ctx); close(done) }()
-
-	// Wait until the one job is mid-flight, so a subsequent poll sees inflight=1.
-	select {
-	case <-probe.started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("job never started")
-	}
-
-	// Poll the reported-capacity history until a value of 2 (3-1) appears while
-	// the job is held -- proving capacity = bound - local in-flight, not derived
-	// from the server's TotalAssignedJobs=99 (which would clamp to 0).
-	sawHeld := false
-	for i := 0; i < 200; i++ {
-		sess.mu.Lock()
-		caps := append([]int(nil), sess.reportedCap...)
-		sess.mu.Unlock()
-		for _, c := range caps {
-			if c == 2 {
-				sawHeld = true
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			jobs := make([]*scaleset.JobAssigned, tc.jobs)
+			for i := range jobs {
+				jobs[i] = assigned(int64(i+1), fmt.Sprintf("held-%d", i+1))
 			}
-			if c < 0 || c > 3 {
-				t.Fatalf("reported capacity %d outside [0,bound=3]", c)
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{
+				messages: []*scaleset.RunnerScaleSetMessage{msgWithAssigned(1, tc.jobs, jobs...)},
+				getErr:   stop,
 			}
-		}
-		if sawHeld {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			prov := &recordingProvisioner{block: release}
+			l := New(sess, &recordingMinter{config: "jit"}, prov, tc.cfg)
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			context.AfterFunc(ctx, func() { releaseOnce.Do(func() { close(release) }) })
+			sess.beforePoll = func(lastMessageID int) {
+				if lastMessageID == 1 {
+					if got := l.inFlight.Load(); got != int64(tc.jobs) {
+						t.Errorf("in flight at second poll = %d, want %d", got, tc.jobs)
+					}
+					releaseOnce.Do(func() { close(release) })
+				}
+			}
+
+			if err := l.Listen(ctx); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if want := []int{tc.want, tc.want}; !slices.Equal(sess.reportedCap, want) {
+				t.Errorf("GetMessage maxCapacity = %v, want %v", sess.reportedCap, want)
+			}
+		})
 	}
-	if !sawHeld {
-		t.Fatal("never reported capacity 2 (bound 3 - 1 in-flight) while a job was held")
+}
+
+func TestListenReconcilesAssignedJobStatistics(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		initial    int
+		messages   []*scaleset.RunnerScaleSetMessage
+		wantAtPoll []int
+	}{
+		{
+			name:    "startup and matching assignment",
+			initial: 2,
+			messages: []*scaleset.RunnerScaleSetMessage{
+				msgWithAssigned(1, 2, assigned(41, "already-covered")),
+			},
+			wantAtPoll: []int{2, 2},
+		},
+		{
+			name:       "startup capped at bound",
+			initial:    9,
+			wantAtPoll: []int{3},
+		},
+		{
+			name: "message shortfall capped at bound",
+			messages: []*scaleset.RunnerScaleSetMessage{
+				msgWithAssigned(1, 0),
+				msgWithAssigned(2, 1, assigned(42, "held")),
+				msgWithAssigned(3, 2),
+				msgWithAssigned(4, 9),
+			},
+			wantAtPoll: []int{0, 0, 1, 2, 3},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stop := errors.New("end of scripted messages")
+			sess := &fakeSession{
+				metadata: scaleset.RunnerScaleSetSession{
+					Statistics: &scaleset.RunnerScaleSetStatistic{TotalAssignedJobs: tc.initial},
+				},
+				messages: tc.messages,
+				getErr:   stop,
+			}
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			prov := &recordingProvisioner{block: release}
+			minter := &recordingMinter{config: "jit"}
+			l := New(sess, minter, prov, Config{MaxRunners: 3})
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			context.AfterFunc(ctx, func() { releaseOnce.Do(func() { close(release) }) })
+			var atPoll []int
+			sess.beforePoll = func(int) {
+				atPoll = append(atPoll, int(l.inFlight.Load()))
+				if len(atPoll) == len(tc.wantAtPoll) {
+					releaseOnce.Do(func() { close(release) })
+				}
+			}
+
+			if err := l.Listen(ctx); !errors.Is(err, stop) {
+				t.Fatalf("Listen returned %v, want %v", err, stop)
+			}
+			if !slices.Equal(atPoll, tc.wantAtPoll) {
+				t.Errorf("runners in flight at each poll = %v, want %v", atPoll, tc.wantAtPoll)
+			}
+			want := tc.wantAtPoll[len(tc.wantAtPoll)-1]
+			if got := len(minter.gotNames); got != want {
+				t.Errorf("JIT mint calls = %d, want %d", got, want)
+			}
+			if got := prov.jobCount(); got != want {
+				t.Errorf("provision calls = %d, want %d", got, want)
+			}
+		})
+	}
+}
+
+func TestListenNilPollReconcilesLatestStatistics(t *testing.T) {
+	stop := errors.New("end of scripted messages")
+	sess := &fakeSession{
+		metadata: scaleset.RunnerScaleSetSession{
+			Statistics: &scaleset.RunnerScaleSetStatistic{},
+		},
+		messages: []*scaleset.RunnerScaleSetMessage{
+			msgWithAssigned(1, 1, assigned(41, "exited-runner")),
+			nil,
+		},
+		getErr: stop,
+	}
+	minter := &recordingMinter{config: "jit"}
+	prov := &recordingProvisioner{}
+	l := New(sess, minter, prov, Config{MaxRunners: 1})
+	sess.beforePoll = func(lastMessageID int) {
+		if lastMessageID == 1 {
+			// The ephemeral provisioner has returned before each subsequent
+			// poll responds, so nil must retry the last known desired count.
+			l.wg.Wait()
+		}
 	}
 
-	// Release the job; capacity must climb back to the full bound (3) once the
-	// in-flight count drops.
-	close(probe.release)
-	sawFull := false
-	for i := 0; i < 200; i++ {
-		sess.mu.Lock()
-		caps := append([]int(nil), sess.reportedCap...)
-		sess.mu.Unlock()
-		for _, c := range caps {
-			if c == 3 {
-				sawFull = true
-			}
-		}
-		if sawFull {
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+	if err := l.Listen(context.Background()); !errors.Is(err, stop) {
+		t.Fatalf("Listen returned %v, want %v", err, stop)
 	}
-	cancel()
-	<-done
-	if !sawFull {
-		t.Fatal("capacity never returned to the full bound after the job finished")
+	if got := len(minter.gotNames); got != 2 {
+		t.Errorf("JIT mint calls = %d, want 2 (initial runner and nil-poll replacement)", got)
+	}
+	if got := prov.jobCount(); got != 2 {
+		t.Errorf("provision calls = %d, want 2", got)
+	}
+	if want := []int{1}; !slices.Equal(sess.deletedIDs, want) {
+		t.Errorf("acknowledged IDs = %v, want %v", sess.deletedIDs, want)
 	}
 }
 

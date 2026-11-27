@@ -40,11 +40,8 @@ func (p *countingProbe) callCount() int {
 	return p.calls
 }
 
-// Capacity reported to GitHub is derived from live headroom (no fixed bound, no
-// per-workload cost table): a batch far from the line, exactly 1 near the line
-// (source-level serialization), and a conservative 1 when the probe fails
-// (never 0, which would starve). MaxRunners is set high so the safety ceiling
-// never binds -- the reactive math is what is under test.
+// Local capacity snapshots estimate headroom. MaxRunners is set high so the
+// reactive calculation determines the snapshot.
 func TestReactiveCapacityFromHeadroom(t *testing.T) {
 	newL := func(p HostProbe) *Listener {
 		return New(&fakeSession{}, &recordingMinter{}, &recordingProvisioner{},

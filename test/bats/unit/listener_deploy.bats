@@ -881,6 +881,66 @@ teardown() { rm -rf "${WORK}"; }
   grep -qxF "PROVISION_SCRIPT=${prefix}/listener/provision-job.sh" "${file}"
 }
 
+@test "listener_backfill_env_file replaces relative script paths once and preserves absolute paths" {
+  local file="${WORK}/listener.env" prefix="${WORK}/opt"
+  local preserved key failed=0
+  local -A scripts=(
+    [PROVISION_SCRIPT]=provision-job.sh
+    [REAP_SCRIPT]=reap.sh
+    [HOST_PROBE_CMD]=host-probe.sh
+  )
+
+  for preserved in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+    install -m 0600 /dev/null "${file}"
+    printf '%s\n' 'GITHUB_CONFIG_URL=https://github.com/acme' 'RUNNER_TYPES_CONFIG=/c.yaml' \
+      'RUNNER_TYPE=gpu' 'SCALE_SET_OWNER=host-a' > "${file}"
+    for key in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+      if [[ ${key} == "${preserved}" ]]; then
+        printf '%s=/custom/%s\n' "${key}" "${scripts[$key]}" >> "${file}"
+      else
+        printf '%s=%s\n' "${key}" "${scripts[$key]}" >> "${file}"
+      fi
+    done
+    cp "${file}" "${file}.before"
+
+    run bash -c '
+      set -e
+      source "$1"
+      LISTENER_PREFIX=$3
+      listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+    ' _ "${LIB}" "${file}" "${prefix}"
+    [ "${status}" -eq 0 ]
+
+    # Backfill leaves the original lines in place and appends an override.
+    head -n "$(wc -l < "${file}.before")" "${file}" | diff -u "${file}.before" - || failed=1
+    for key in PROVISION_SCRIPT REAP_SCRIPT HOST_PROBE_CMD; do
+      if [[ ${key} == "${preserved}" ]]; then
+        [ "$(grep -c "^${key}=" "${file}")" -eq 1 ] || failed=1
+      else
+        local expected="${key}=${prefix}/listener/${scripts[$key]}"
+        local actual
+        actual=$(sed -n "/^${key}=/p" "${file}" | tail -n 1)
+        if [[ ${actual} != "${expected}" ]]; then
+          printf 'Last assignment was %s, expected %s\n' "${actual}" "${expected}" >&2
+          failed=1
+        fi
+        [ "$(grep -c "^${key}=" "${file}")" -eq 2 ] || failed=1
+      fi
+    done
+
+    cp "${file}" "${file}.once"
+    run bash -c '
+      set -e
+      source "$1"
+      LISTENER_PREFIX=$3
+      listener_backfill_env_file "$2" https://github.com/acme /c.yaml gpu
+    ' _ "${LIB}" "${file}" "${prefix}"
+    [ "${status}" -eq 0 ]
+    diff -u "${file}.once" "${file}" || failed=1
+  done
+  [ "${failed}" -eq 0 ]
+}
+
 @test "listener_backfill_env_file uses the hostname with an ownerless config URL" {
   local file="${WORK}/listener.env"
   install -m 0600 /dev/null "${file}"
