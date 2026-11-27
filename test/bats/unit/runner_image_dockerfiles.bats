@@ -128,3 +128,110 @@ cpu_instructions() {
   # actual instruction bakes in --privileged.
   ! grep -vE '^[[:space:]]*#' "${GPU}" | grep -qF -- '--privileged'
 }
+
+# --- GPU image Docker CLI (host-daemon jobs) --------------------------------
+# GPU workflows drive the host Docker daemon through a mounted socket, so the
+# GPU image must ship the Docker CLI plus the SAME pinned Compose and Buildx
+# plugins as the CPU image. The plugin install is one shared block, marked in
+# both Dockerfiles, and the two copies must stay byte-identical.
+
+# Ignore Dockerfile comments when checking executable lines.
+gpu_instructions() {
+  [ -f "${GPU}" ] || return 1
+  sed '/^[[:space:]]*#/d' "${GPU}"
+}
+
+# The shared plugin block of one Dockerfile, markers included.
+plugin_block() {
+  awk '
+    /^# BEGIN docker-cli-plugins/ { inblock = 1 }
+    inblock { print }
+    /^# END docker-cli-plugins/ { exit }
+  ' "$1"
+}
+
+@test "CPU and GPU Dockerfiles carry one shared, byte-identical plugin block" {
+  local cpu_block gpu_block
+  cpu_block="$(plugin_block "${CPU}")"
+  gpu_block="$(plugin_block "${GPU}")"
+  [ -n "${cpu_block}" ]
+  grep -q '^# END docker-cli-plugins' <<<"${cpu_block}"
+  [ "${cpu_block}" = "${gpu_block}" ]
+}
+
+@test "the shared plugin block holds the Compose and Buildx pins and their checks" {
+  local block arg
+  block="$(plugin_block "${GPU}")"
+  for arg in COMPOSE_VERSION COMPOSE_SHA256_AMD64 COMPOSE_SHA256_ARM64 \
+             BUILDX_VERSION BUILDX_SHA256_AMD64 BUILDX_SHA256_ARM64; do
+    grep -Eq "^ARG ${arg}=" <<<"${block}"
+  done
+  grep -Fq 'ARG COMPOSE_VERSION=v5.7.1' <<<"${block}"
+  grep -Fq 'ARG BUILDX_VERSION=v0.39.0' <<<"${block}"
+  grep -Eq 'sha256sum[[:space:]]+-c' <<<"${block}"
+  grep -Fq '/usr/local/lib/docker/cli-plugins' <<<"${block}"
+  # Each Dockerfile declares the plugin pins exactly once (inside the block).
+  local f
+  for f in "${CPU}" "${GPU}"; do
+    [ "$(grep -cE '^ARG (COMPOSE|BUILDX)_' "${f}")" -eq 6 ]
+  done
+}
+
+@test "GPU Dockerfile pins the Docker CLI static release and its per-arch checksums" {
+  run grep -E '^ARG DOCKER_VERSION=' "${GPU}"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" =~ ^ARG\ DOCKER_VERSION=[0-9]+\.[0-9]+\.[0-9]+[[:blank:]]*$ ]]
+  local arg
+  for arg in DOCKER_SHA256_AMD64 DOCKER_SHA256_ARM64; do
+    run grep -E "^ARG ${arg}=" "${GPU}"
+    [ "${status}" -eq 0 ]
+    [[ "${output}" =~ ^ARG\ ${arg}=[0-9a-f]{64}[[:blank:]]*$ ]]
+  done
+  run gpu_instructions
+  [ "${status}" -eq 0 ]
+  grep -Fq 'DOCKER_SHA256_' <<<"${output}"
+  grep -Eq 'sha256sum[[:space:]]+-c' <<<"${output}"
+}
+
+@test "GPU Dockerfile downloads only official Docker release URLs and never pipes into a shell" {
+  local url
+  run gpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  run grep -E '\|[[:space:]]*([^[:space:]|;]+/)?(sh|bash)([[:space:];&|]|$)' <<<"${instructions}"
+  [ "${status}" -eq 1 ]
+  run grep -ioE 'https://download\.docker\.com/linux/static/stable/|https://github\.com/docker/(compose|buildx)/releases/download/|https?://' <<<"${instructions}"
+  [ "${status}" -eq 0 ]
+  for url in "${lines[@]}"; do
+    case "${url}" in
+      https://download.docker.com/linux/static/stable/*|https://github.com/docker/compose/releases/download/*|https://github.com/docker/buildx/releases/download/*) ;;
+      *) echo "unexpected GPU download URL: ${url}"; return 1 ;;
+    esac
+  done
+  [[ "${output}" == *"https://download.docker.com/linux/static/stable/"* ]]
+}
+
+@test "GPU Dockerfile installs only the docker CLI binary, never the daemon" {
+  run gpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  grep -Eq 'install[[:blank:]].*/usr/local/bin/docker([[:blank:]]|;|$)' <<<"${instructions}"
+  run grep -Ew 'dockerd|containerd|docker-proxy' <<<"${instructions}"
+  [ "${status}" -eq 1 ]
+}
+
+@test "GPU Dockerfile bakes in no docker group, so socket access comes from --group-add" {
+  run gpu_instructions
+  [ "${status}" -eq 0 ]
+  run grep -Ei 'groupadd|addgroup|usermod|gpasswd|[[:blank:]]docker:|:docker[[:blank:]]' <<<"${output}"
+  [ "${status}" -eq 1 ]
+}
+
+@test "GPU Dockerfile ends as runner and keeps its CUDA copy" {
+  run gpu_instructions
+  [ "${status}" -eq 0 ]
+  local instructions="${output}"
+  grep -Fq 'COPY --from=cuda /usr/local/cuda /usr/local/cuda' <<<"${instructions}"
+  run bash -c 'grep -iE "^[[:blank:]]*USER[[:blank:]]" | tail -n 1' <<<"${instructions}"
+  [[ "${output}" =~ ^[[:blank:]]*USER[[:blank:]]+runner[[:blank:]]*$ ]]
+}

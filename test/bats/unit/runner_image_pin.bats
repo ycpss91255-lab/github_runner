@@ -135,3 +135,46 @@ fallback_version() {
   grep -qF "${CURRENT_VERSION}" <<< "${fixed}"
   grep -qF 'Listening for Jobs' <<< "${fixed}"
 }
+
+# The lines of the gpu entry in the sample, up to the next type.
+gpu_entry() {
+  awk '
+    /^  - name: / { gpu = ($0 == "  - name: gpu") }
+    gpu { print }
+  ' "${SAMPLE}"
+}
+
+@test "sample GPU type shows the commented docker_socket opt-in with its root-equivalence note" {
+  entry="$(gpu_entry)"
+  grep -qE '^    # docker_socket: /var/run/docker\.sock$' <<<"${entry}"
+  grep -qiE '^    #.*root-equivalent' <<<"${entry}"
+  # Commented out: socket access stays off by default.
+  ! grep -qE '^    docker_socket:' <<<"${entry}"
+}
+
+@test "sample GPU type does not route builds to kaniko (GPU jobs use the host daemon)" {
+  entry="$(gpu_entry)"
+  ! grep -qE '^    build_tool:' <<<"${entry}"
+}
+
+@test "deployment README section 3b documents the GPU Docker CLI and the post-publish pin step" {
+  section="$(awk '
+    /^## 3b\./ { section = 1; next }
+    section && /^## / { exit }
+    section { print }
+  ' "${README}")"
+  grep -qF 'docker --version' <<<"${section}"
+  grep -qF 'download.docker.com' <<<"${section}"
+  grep -qF -- '--group-add' <<<"${section}"
+  grep -qiE 'after (the|each|a) .*publish.*gpu|gpu.*after (the|each|a) .*publish' <<<"${section}"
+}
+
+@test "Unreleased changelog records the GPU image Docker CLI" {
+  unreleased="$(awk '
+    /^## \[Unreleased\][[:space:]]*$/ { unreleased = 1; next }
+    unreleased && /^## \[/ { exit }
+    unreleased { print }
+  ' "${CHANGELOG}")"
+  grep -qF 'ghcr.io/ycpss91255-lab/gpu-runner' <<<"${unreleased}"
+  grep -qF 'docker: command not found' <<<"${unreleased}"
+}

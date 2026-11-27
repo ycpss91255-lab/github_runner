@@ -376,6 +376,28 @@ docker buildx imagetools inspect ghcr.io/your-org/gpu-runner:2.338.2   # copy Di
 # -> image: ghcr.io/your-org/gpu-runner@sha256:<digest>
 ```
 
+**Docker CLI in the GPU image.** GPU workflows build and run containers on the
+host Docker daemon, so the GPU image ships the static docker CLI (client only,
+no daemon) from `download.docker.com`, checked against a pinned SHA-256, plus
+the same Compose and Buildx plugins as the CPU image. The plugin install is a
+block shared byte-for-byte with `images/runner-cpu.Dockerfile`; a bats test
+fails if the two copies drift. The image bakes in no `docker` group. When a
+type sets `docker_socket`, the provisioner adds the socket's host GID with
+`--group-add`, which is what lets the `runner` user reach the daemon. To check
+a local build:
+
+```sh
+docker run --rm gpu-runner:2.338.2 docker --version
+docker run --rm gpu-runner:2.338.2 docker compose version
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+  --group-add "$(stat -c %g /var/run/docker.sock)" gpu-runner:2.338.2 docker info
+```
+
+After the first publish that carries the docker CLI, pin the sample GPU type:
+copy the `ghcr.io/ycpss91255-lab/gpu-runner@sha256:<digest>` line from the
+workflow's job summary into the gpu type's `image:` and uncomment
+`docker_socket` only for trusted jobs.
+
 > **A GPU job actually executing is HITL.** The images *build* and are wired
 > into the GPU runner-type config AFK; running a real GPU job needs a host with
 > the NVIDIA driver + container runtime — an operator step on the target host.
