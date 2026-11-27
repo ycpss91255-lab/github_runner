@@ -8,6 +8,12 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Runner types can opt into the host Docker socket.** Set `docker_socket`
+  on a trusted type to let its jobs use the host Docker daemon for builds,
+  runs, and Compose. This grants root-equivalent host access. The provisioner
+  adds the socket's host GID for the runner user and retains baseline
+  container hardening. Socket access defaults to off for every type.
+
 - **CI builds and publishes the self-built runner images to ghcr.io.** The new
   `runner images` workflow builds `ghcr.io/ycpss91255-lab/runner-base` and
   `ghcr.io/ycpss91255-lab/gpu-runner`, tagged with the runner version, on a

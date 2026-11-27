@@ -145,8 +145,20 @@ sudo useradd --system --create-home --shell /usr/sbin/nologin ci-runner
 sudo usermod -aG docker ci-runner
 ```
 
-`docker` group membership is root-equivalent on the host; job code never gets
-the socket (see `listener/README.md`), only the listener does.
+`docker` group membership is root-equivalent on the host.
+
+### Host Docker socket opt-in
+
+Socket access for jobs defaults to off. Set `docker_socket: /var/run/docker.sock`
+on a trusted runner type to grant its jobs root-equivalent access to the host
+Docker daemon. The listener passes an explicit empty value for types that leave
+access off. For an opted-in type, the provisioner mounts the socket with `:Z`,
+adds its host GID with `--group-add`, and keeps the other hardening flags.
+Fork PRs are expected to be gated by
+`approval_policy=all_external_contributors`. Job-started containers resolve bind
+mounts on the host, where the job checkout is unavailable. See the
+[listener README](../listener/README.md#host-docker-socket-opt-in-116) for
+details and ways to transfer workspace files.
 
 ## 2a. Create the writable runner state tree
 

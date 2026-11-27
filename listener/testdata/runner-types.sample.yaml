@@ -7,8 +7,8 @@
 #
 # The Go listener is the AUTHORITATIVE parser (ADR-0003): it loads and validates
 # this file, then passes only the per-job fields a provision needs (image,
-# devices, runtime, build tool) across the shell-out boundary to the bash
-# container provisioner. Bash never parses this file.
+# devices, runtime, build tool, Docker socket) across the shell-out boundary to
+# the bash container provisioner. Bash never parses this file.
 #
 # Install it next to the listener's EnvironmentFile, e.g.:
 #   sudo install -m 0644 deploy/runner-types.sample.yaml \
@@ -54,6 +54,8 @@
 #                               with the local engine, so a wrong value makes
 #                               the run fail loudly rather than be ignored.
 #   build_tool        optional  daemonless image builder (kaniko / buildkit).
+#   docker_socket     optional  host Docker socket to bind-mount at the same
+#                               path. ROOT-EQUIVALENT on the host. Default off.
 #   concurrency       optional  worker-pool sizing. REACTIVE BY DEFAULT:
 #                                 (omitted)             reactive live-admission --
 #                                                       admit each job while every
@@ -106,6 +108,8 @@ runner_types:
     scale_set: cpu-runners
     labels: [self-hosted, linux, x64, cpu]
     image: ghcr.io/actions/actions-runner@sha256:08c30b0a7105f64bddfc485d2487a22aa03932a791402393352fdf674bda2c29
+    # Enable only for trusted jobs that need the host Docker daemon.
+    # docker_socket: /var/run/docker.sock
     # Reactive live-admission (ADR-0005, #163): the listener admits each job
     # while CPU and memory each keep at least reserve% free -- the concurrent
     # count is derived from live headroom, not pinned. Raise reserve to leave
