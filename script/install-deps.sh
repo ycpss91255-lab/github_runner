@@ -80,6 +80,16 @@ install_gh() {
   run_root apt-get install -y gh
 }
 
+# 'gh auth status' hangs forever when the GNOME Keyring login collection is
+# locked (headless/SSH), so probe with a bounded real API call instead.
+gh_authed() {
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${GH_AUTH_TIMEOUT:-15}" gh api user --jq .login </dev/null >/dev/null 2>&1
+  else
+    gh api user --jq .login </dev/null >/dev/null 2>&1
+  fi
+}
+
 # --dry-run report: what's missing + gh auth status. Installs nothing, so it
 # works on any host (even without apt).
 report() {
@@ -91,7 +101,7 @@ report() {
     echo "all CLI deps present: ${DEPS[*]}"
   fi
   if have gh; then
-    if gh auth status >/dev/null 2>&1; then
+    if gh_authed; then
       echo "gh: authenticated"
     else
       echo "gh: not authenticated (would run: gh auth login --scopes admin:org)"
@@ -136,7 +146,7 @@ main() {
   fi
 
   if have gh; then
-    if gh auth status >/dev/null 2>&1; then
+    if gh_authed; then
       echo "gh already authenticated."
     else
       echo "==> launching gh auth login (interactive)..."

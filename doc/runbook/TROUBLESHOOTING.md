@@ -50,9 +50,11 @@ first diagnostic command, and a fix. All commands run from the repo checkout
 
 - **Means:** the GitHub API call failed — almost always `gh` auth expired, lost
   network, or a rate-limit. `n/a` is "couldn't ask", not "bad".
-- **Diagnose:** `gh auth status`. If it reports not-logged-in / expired token,
+- **Diagnose:** `gh api user`. If it reports not-logged-in / expired token,
   that is the cause (it is independent of the runner's own registration).
 - **Fix:** `gh auth login --scopes admin:org`, then re-run `status.sh`.
+  If the check hangs or times out instead, the GNOME Keyring is likely locked
+  (headless/SSH); unlock it, set `GH_TOKEN`, or use `gh auth login --insecure-storage`.
 
 ### `PUBLIC-DISPATCH = public-BLOCKED` (jobs from public repos stay queued)
 
@@ -115,7 +117,7 @@ After rebuilding a host from the README "Rebuild SOP":
 ./script/status.sh                              # local + GitHub state, all runners
 sudo journalctl -u 'actions.runner.*' -n 100 --no-pager
 systemctl list-units 'actions.runner.*'
-gh auth status
+gh api user --jq .login   # not 'gh auth status': it hangs when the keyring is locked
 df -h <repo_root>/runners
 ./script/cleanup.sh --dry-run                   # what cleanup would reclaim
 ```

@@ -498,6 +498,21 @@ setup() {
   [[ "${output}" == *"not authenticated"* ]]
 }
 
+@test "require_gh_auth probes with 'gh api user', never 'gh auth status'" {
+  run bash -c "source '${LIB}'; _gh() { echo \"\$*\"; [ \"\$1\" = api ]; }; require_gh_auth && echo OK"
+  [ "${status}" -eq 0 ]
+  [[ "${output}" == *"OK"* ]]
+}
+
+@test "require_gh_auth fails fast with a keyring hint when gh hangs" {
+  # A locked GNOME Keyring makes gh block forever; the probe must be bounded.
+  command -v timeout >/dev/null || skip "timeout(1) not available"
+  run bash -c "source '${LIB}'; _gh() { sleep 30; }; GH_AUTH_TIMEOUT=1 require_gh_auth"
+  [ "${status}" -eq 1 ]
+  [[ "${output}" == *"timed out after 1s"* ]]
+  [[ "${output}" == *"keyring"* ]]
+}
+
 @test "require_gh_auth returns 0 when gh auth succeeds" {
   run bash -c "source '${LIB}'; _gh() { return 0; }; require_gh_auth && echo OK"
   [ "${status}" -eq 0 ]
