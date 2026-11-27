@@ -145,6 +145,35 @@ matching_step() {
   grep -Eq 'docker run[[:blank:]].*(runner-cpu|CPU_IMAGE)[^;]*docker buildx version([[:blank:]]|$)' <<<"${output}"
 }
 
+@test "runner-cpu version commands in build and publish suppress runner logs on stdout" {
+  # WHY: The upstream image enables stdout tracing, which adds log lines to
+  # Runner.Listener --version output and breaks the publish version check.
+  local command_pattern='/^[[:space:]]*#/ { next } /runner-cpu/ && /Runner[.]Listener --version/'
+  local job
+  for job in build publish; do
+    if ! job_block "${job}" | awk "${command_pattern}" | grep -q .; then
+      echo "${job} has no runner-cpu version command"
+      return 1
+    fi
+  done
+
+  awk "${command_pattern}" "${WF}" | awk '
+    !/env -u ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT([[:space:]]|$)/ &&
+    !/-e ACTIONS_RUNNER_PRINT_LOG_TO_STDOUT=([[:space:]]|$)/ {
+      print "runner-cpu version command leaves stdout tracing enabled: " $0
+      failed = 1
+    }
+    END { exit failed }
+  '
+}
+
+@test "the build job checks that runner-cpu reports a three-part numeric version" {
+  run job_block build
+  [ "${status}" -eq 0 ]
+  grep -Fq 'runner-cpu' <<<"${output}"
+  grep -Fq '=~ ^[0-9]+\.[0-9]+\.[0-9]+$' <<<"${output}"
+}
+
 @test "the publish job builds the CPU image and reads its runner version in the same step" {
   run matching_step publish 'images/runner-cpu[.]Dockerfile' 'Runner[.]Listener --version' ''
   [ "${status}" -eq 0 ]
