@@ -187,8 +187,8 @@ just lint-host
 just test-host
 ```
 
-CI 每次 push / PR 跑 `lint` + `test` + `coverage-gate`，Go job 另外跑
-`coverage-go`。**覆蓋率是 merge gate，不只是 metric**：兩個下限都釘在
+CI 每個 PR 跑 `lint` + `test`；`coverage-gate` 和 Go job 的 `coverage-go`
+在 merge queue 與 push 到 main 時跑（插樁的 coverage 不在 PR 上跑）。**覆蓋率是 merge gate，不只是 metric**：兩個下限都釘在
 `script/coverage-gate.sh`，報告低於下限就讓 build 失敗；`listener/cmd/` 不
 計入 Go 下限（那層是 wiring，改由 integration / system 層覆蓋，見
 `doc/PRD.md`）。kcov 比純 bats 慢 2-5×，這就是 gate 的代價。報告不會

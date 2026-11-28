@@ -142,6 +142,11 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **Instrumented coverage runs in the merge queue, not on PRs.** The kcov
+  `coverage` job and the Go coverage floor are skipped on `pull_request` and
+  run on `merge_group` and pushes to main; the floor still blocks the merge
+  through `ci-rollup`. The `push` trigger is limited to main, since a branch
+  push is already covered by its PR run.
 - **CI runs in the merge queue.** The `ci` workflow also triggers on
   `merge_group`, so the required `ci-rollup` check reports on the queue's
   merge ref once main requires a merge queue.

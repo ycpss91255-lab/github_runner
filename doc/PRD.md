@@ -692,9 +692,11 @@ floor is a deliberate edit in one file:
 
 - **Bash**, over the line rate of the kcov cobertura report `just coverage`
   writes. Enforced by the `coverage-gate` recipe and by the CI `coverage` job,
-  which is in the `needs:` list of `ci-rollup`.
+  which is in the `needs:` list of `ci-rollup`. CI runs it in the merge queue
+  and on pushes to main, not on pull requests.
 - **The Go core**, over the total from `go tool cover -func` for the `listener`
-  package. Enforced by the `coverage-go` recipe and by the CI `go` job.
+  package. Enforced by the `coverage-go` recipe and by the CI `go` job (merge
+  queue and pushes to main only).
   `listener/cmd/scaleset-listener` is **excluded from the measurement**: it reads
   environment variables and wires the pieces together, making no decisions of its
   own, and it is exercised by the integration and system layers instead. This is
