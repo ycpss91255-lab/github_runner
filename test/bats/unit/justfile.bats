@@ -235,6 +235,15 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "ci runs on merge_group so ci-rollup reports inside the merge queue" {
+  # With a merge queue on main, the queue waits for the required ci-rollup
+  # check on its own merge_group ref. A workflow that does not trigger on
+  # merge_group never reports there, and every queued PR waits forever.
+  local ci="${ROOT}/.github/workflows/ci.yaml"
+  run grep -E '^  merge_group:' "${ci}"
+  [ "${status}" -eq 0 ]
+}
+
 @test "build-listener passes -buildvcs=false so the container build is not broken by dubious git ownership" {
   run grep -E 'build-listener' "${JUSTFILE}"
   [ "${status}" -eq 0 ]
