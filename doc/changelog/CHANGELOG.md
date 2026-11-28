@@ -142,6 +142,9 @@ versioning follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
+- **CI runs in the merge queue.** The `ci` workflow also triggers on
+  `merge_group`, so the required `ci-rollup` check reports on the queue's
+  merge ref once main requires a merge queue.
 - **Sample runner images carry the baseline host tools.** Both sample types in
   `deploy/runner-types.sample.yaml` (and its listener testdata copy) now pin
   the images published with the baseline host tools (#161):

@@ -3,6 +3,9 @@ name: ci
 on:
   push:
   pull_request:
+  # The merge queue on main runs ci-rollup on its merge_group ref before it
+  # merges; without this trigger the required check never reports there.
+  merge_group:
 
 env:
   TEST_TOOLS_IMAGE: ghcr.io/ycpss91255-lab/test-tools:latest
