@@ -244,6 +244,20 @@ EOF
   [ "${status}" -eq 0 ]
 }
 
+@test "instrumented coverage skips pull_request and runs in the queue and on main" {
+  # Owner rule (2026-11-28): kcov and the Go coverage floor run on merge_group
+  # and pushes to main, not on every PR. The floor still blocks the merge
+  # because the queue requires ci-rollup, and coverage stays in its needs list.
+  local ci="${ROOT}/.github/workflows/ci.yaml"
+  run bash -c "grep -A2 -E '^  coverage:' '${ci}' | grep -F \"if: github.event_name != 'pull_request'\""
+  [ "${status}" -eq 0 ]
+  run bash -c "grep -B1 -F 'run: just coverage-go' '${ci}' | grep -F \"if: github.event_name != 'pull_request'\""
+  [ "${status}" -eq 0 ]
+  # A branch push is a PR push; only main may trigger the push event.
+  run bash -c "grep -A2 -E '^  push:' '${ci}' | grep -F 'branches: [main]'"
+  [ "${status}" -eq 0 ]
+}
+
 @test "build-listener passes -buildvcs=false so the container build is not broken by dubious git ownership" {
   run grep -E 'build-listener' "${JUSTFILE}"
   [ "${status}" -eq 0 ]

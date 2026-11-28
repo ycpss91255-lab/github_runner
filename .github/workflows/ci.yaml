@@ -1,7 +1,10 @@
 name: ci
 
 on:
+  # Branch pushes are PR pushes and already run through pull_request; only
+  # main needs the push event (it carries the post-merge coverage run).
   push:
+    branches: [main]
   pull_request:
   # The merge queue on main runs ci-rollup on its merge_group ref before it
   # merges; without this trigger the required check never reports there.
@@ -141,23 +144,24 @@ jobs:
       # The Go coverage floor (PRD.md §0.4). Lives in this job because it needs
       # the same pinned toolchain image, and this job already gates merges. The
       # recipe excludes listener/cmd/ from the measurement: that entrypoint is
-      # wiring, covered at the integration and system level instead.
+      # wiring, covered at the integration and system level instead. Like the
+      # kcov job it skips pull_request and runs in the merge queue and on main.
       - name: go coverage floor (listener core)
+        if: github.event_name != 'pull_request'
         run: just coverage-go
 
   coverage:
-    # Runs on every push and PR, and blocks the merge. It used to be advisory --
-    # continue-on-error, main-push only, outside the ci-rollup needs list -- on
-    # the grounds that the measurement was not reproducible: it apt-installed
-    # bats inside the kcov container on every run, so it needed the network and
-    # measured with whatever bats version the archive carried that day. That is
-    # fixed: the recipe now runs a pinned, sha256-verified bats in a container
-    # started with --network none, and the same command reproduces the number
-    # on a maintainer's machine. A reproducible number can hold a line, so it
-    # does -- see the floors in script/coverage-gate.sh.
+    if: github.event_name != 'pull_request'
+    # Runs in the merge queue (merge_group) and on pushes to main, and blocks
+    # the merge through ci-rollup. Owner rule (2026-11-28): instrumented
+    # coverage does not run on every PR; a PR runs the uninstrumented bats and
+    # go test jobs, and the queue runs the floor before anything reaches main.
+    # On a PR this job is skipped, which ci-rollup folds into a pass.
     #
-    # The cost is honest: kcov instrumentation is 2-5x slower than plain bats,
-    # and PRs now pay it. That is what a gate costs.
+    # The measurement is reproducible: the recipe runs a pinned, sha256-verified
+    # bats in a container started with --network none, and the same command
+    # reproduces the number on a maintainer's machine. kcov instrumentation is
+    # 2-5x slower than plain bats, which is why it waits for the queue.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -171,10 +175,9 @@ jobs:
     # Single aggregator that branch protection requires, mirroring base's
     # self-test.yaml ci-rollup. Every sub-job joins this `needs:` list so branch
     # protection tracks one stable check name regardless of how the sub-jobs are
-    # renamed or split later. `coverage` used to be excluded on purpose, as a
-    # main-push-only metric; it now carries the bash coverage floor, so leaving
-    # it out would mean the floor could not fail a PR, which is the same as not
-    # having one. The same reasoning admits the three structure lints: each was
+    # renamed or split later. `coverage` carries the bash coverage floor; it is
+    # skipped on pull_request and runs in the merge queue, where its failure
+    # keeps the PR out of main. The same reasoning admits the three structure lints: each was
     # enforced only by a local hook, and a rule that cannot fail a PR is only
     # half enforced. SKIPPED folds into pass so future conditionally-gated
     # sub-jobs don't wedge doc-only PRs.

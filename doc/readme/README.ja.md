@@ -196,8 +196,9 @@ just lint-host
 just test-host
 ```
 
-CI は push / PR ごとに `lint` + `test` + `coverage-gate` を実行し、Go job で
-`coverage-go` を実行します。**カバレッジは metric ではなく merge gate です**:
+CI は PR ごとに `lint` + `test` を実行し、`coverage-gate` と Go job の
+`coverage-go` は merge queue と main への push で実行します（計装付きの
+coverage は PR では実行しません）。**カバレッジは metric ではなく merge gate です**:
 2 つの下限は `script/coverage-gate.sh` に固定され、下限を下回るレポートは
 ビルドを失敗させます。`listener/cmd/` は Go の下限から除外します（wiring 層
 であり、integration / system 層で担保するため。`doc/PRD.md` 参照）。kcov は

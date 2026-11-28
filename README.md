@@ -203,8 +203,9 @@ just lint-host
 just test-host
 ```
 
-CI mirrors `just lint` + `test` + `coverage-gate` on every push / PR, and the
-Go job runs `coverage-go`. Coverage is a merge gate, not just a metric: both
+CI mirrors `just lint` + `test` on every PR, and runs `coverage-gate` and the
+Go job's `coverage-go` in the merge queue and on pushes to main (instrumented
+coverage does not run on PRs). Coverage is a merge gate, not just a metric: both
 floors are pinned in `script/coverage-gate.sh` and a report below one fails the
 build. `listener/cmd/` is excluded from the Go floor -- it is wiring, covered by
 the integration and system layers instead (see `doc/PRD.md`). kcov is 2-5x
